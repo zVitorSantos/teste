@@ -2077,9 +2077,6 @@ do
                 _G['自己身体'].JumpPower = _G['菜单']['跳跃提升']
             end)
 
-            if _G['菜单']['消除雾'] then
-                _G['灯光'].FogEnd = 1000000
-            end
 
             spawn(function()
                 local nextFn2 = next
@@ -2441,11 +2438,11 @@ do
             targets = { 'Spooky', 'SpookyNeon' },
             size = 'Any',
             limit = 10,
-            stopFound = true,
             tpFound = true,
+            autoCollect = false,
+            baseSlot = 1,
             webhookOn = false,
             webhook = '',
-            loadOn = false,
             source = SCRIPT_URL,
             active = false,
             hops = 0,
@@ -2679,19 +2676,19 @@ do
             end
         end)
 
-        local Set = Finder:Section('When Found'):SetOrder(3)
-        Set:Toggle('Stop hopping when found', cfg.stopFound, function(v)
-            cfg.stopFound = v
-            save()
-        end, 'Tree Finder only. On: stops after a find. Off: shows a notification with Stop for 5s, then hops on. Continuous Hop uses Stop hop if found instead.')
+        local Set = Finder:Section('Hunt: After Found'):SetOrder(3)
         Set:Toggle('Teleport to tree when found', cfg.tpFound, function(v)
             cfg.tpFound = v
             save()
-        end)
-        Set:Toggle('Load script when found', cfg.loadOn, function(v)
-            cfg.loadOn = v
+        end, 'Ignored when Auto collect is on (loading the slot moves you anyway).')
+        Set:Toggle('Auto collect after find', cfg.autoCollect, function(v)
+            cfg.autoCollect = v
             save()
-        end)
+        end, 'Hunt & Stop only. After a find:\n1. loads the slot below (auto-picks a free plot)\n2. takes the End Times Axe from that base into your hand\n3. cuts the found tree and brings the log to your base\nEvery step is sent to the webhook.')
+        Set:NumberInput('Slot to load (1-6)', tonumber(cfg.baseSlot) or 1, 1, 6, function(n)
+            cfg.baseSlot = math.floor(n)
+            save()
+        end, 1)
 
         local Snd = Finder:Section('Sound Alert', true):SetOrder(4)
         Snd:Toggle('Play sound when found', cfg.soundOn, function(v)
@@ -2707,10 +2704,11 @@ do
             playAlert()
         end)
 
-        local Run = Finder:Section('Tree Finder'):SetOrder(1)
-        Run:Label('Hunts only the trees in Trees to hunt')
-        Run:Label('Hops servers until found, then stops (see Settings)')
-        Run:Label('If it keeps hopping, a Stop notification shows first')
+        local Run = Finder:Section('Hunt & Stop'):SetOrder(1)
+        Run:Label('Hops server to server looking for the trees in Trees to hunt.')
+        Run:Label('STOPS for good on the first find, it never hops again after that.')
+        Run:Label('Optional Auto collect (see Hunt: After Found) grabs the tree for you.')
+        Run:Label('Want to keep hopping and just log finds? Use Scout Hop below.')
         local statusLabel = Run:Label('Status : idle')
         local function setStatus(t)
             statusLabel.Text = 'Status : ' .. t
@@ -2760,18 +2758,23 @@ do
             return list
         end
 
-        local function sendWebhook(t)
-            if not cfg.webhookOn then return end
+        local function postJson(tbl)
+            if not cfg.webhookOn then return false end
             if not cfg.webhook:match('^https://[%w%.]*discord%w*%.com/api/webhooks/') then
                 _G['提醒']('Webhook URL not set / invalid')
-                return
+                return false
             end
             local req = (syn and syn.request) or http_request or request or (fluxus and fluxus.request)
             if not req then
                 _G['提醒']('Executor has no http request function')
-                return
+                return false
             end
-            local body = HttpService:JSONEncode({
+            pcall(req, { Url = cfg.webhook, Method = 'POST', Headers = { ['Content-Type'] = 'application/json' }, Body = HttpService:JSONEncode(tbl) })
+            return true
+        end
+
+        local function sendWebhook(t)
+            postJson({
                 username = 'Rndm script',
                 embeds = {{
                     title = 'Tree found: ' .. t.class,
@@ -2780,24 +2783,196 @@ do
                         { name = 'Sections', value = tostring(t.sections), inline = true },
                         { name = 'Players', value = string.format('%d/%d', #Players:GetPlayers(), Players.MaxPlayers), inline = true },
                         { name = 'Hops', value = tostring(cfg.hops), inline = true },
+                        { name = 'Auto collect', value = cfg.autoCollect and ('on, slot ' .. tostring(cfg.baseSlot)) or 'off', inline = true },
                         { name = 'Server ID', value = '`' .. (encodeServerId(game.JobId) or game.JobId) .. '`\n`' .. game.JobId .. '`' },
                         { name = 'Join', value = string.format('```lua\ngame:GetService("TeleportService"):TeleportToPlaceInstance(%d, "%s")\n```', game.PlaceId, game.JobId) },
                     },
                 }},
             })
-            pcall(req, { Url = cfg.webhook, Method = 'POST', Headers = { ['Content-Type'] = 'application/json' }, Body = body })
+        end
+
+        local function webhookStep(title, text, color)
+            postJson({
+                username = 'Rndm script',
+                embeds = {{
+                    title = title,
+                    description = text,
+                    color = color or 3447003,
+                    fields = {
+                        { name = 'Server ID', value = '`' .. (encodeServerId(game.JobId) or game.JobId) .. '`', inline = true },
+                        { name = 'Player', value = LP.Name, inline = true },
+                    },
+                }},
+            })
         end
 
         local function onFound(t)
             _G['提醒'](string.format('%s tree found! (%d sections)', t.class, t.sections))
             if cfg.soundOn then playAlert() end
             sendWebhook(t)
-            if cfg.tpFound then
+            if cfg.tpFound and not cfg.autoCollect then
                 pcall(function() _G['传送'](t.part.CFrame) end)
             end
-            if cfg.loadOn then
-                pcall(function() loadstring(game:HttpGet(SCRIPT_URL))() end)
+        end
+
+
+        -- Auto collect (Hunt & Stop only): load slot -> End Times Axe in hand -> cut -> log to base.
+        local function ownedPlot()
+            local props = game:GetService('Workspace'):FindFirstChild('Properties')
+            if not props then return nil end
+            for _, p in ipairs(props:GetChildren()) do
+                local o = p:FindFirstChild('Owner')
+                if o and o.Value == LP and p:FindFirstChild('OriginSquare') then
+                    return p
+                end
             end
+            return nil
+        end
+
+        local function endTimesTool()
+            for _, holder in ipairs({ LP.Character, LP:FindFirstChild('Backpack') }) do
+                if holder then
+                    for _, tool in ipairs(holder:GetChildren()) do
+                        local tn = tool:IsA('Tool') and tool:FindFirstChild('ToolName')
+                        if tn and tn.Value == 'EndTimesAxe' then
+                            return tool
+                        end
+                    end
+                end
+            end
+            return nil
+        end
+
+        local function endTimesInBase()
+            local pm = game:GetService('Workspace'):FindFirstChild('PlayerModels')
+            if not pm then return nil end
+            for _, m in ipairs(pm:GetChildren()) do
+                local tn, ow = m:FindFirstChild('ToolName'), m:FindFirstChild('Owner')
+                if tn and ow and tostring(tn.Value) == 'EndTimesAxe' and ow.Value == LP then
+                    return m
+                end
+            end
+            return nil
+        end
+
+        local function autoCollect(t, setStatus)
+            local slot = math.clamp(math.floor(tonumber(cfg.baseSlot) or 1), 1, 6)
+            local title = 'Auto collect: ' .. t.class
+            local function step(msg, color)
+                setStatus(msg)
+                _G['提醒'](msg)
+                webhookStep(title, msg, color)
+            end
+            local function fail(msg)
+                step('FAILED: ' .. msg, 15548997)
+                return false
+            end
+
+            -- the slot/axe helpers are defined further down the script
+            local tw = tick()
+            repeat task.wait(0.5) until (_G['加载'] and _G['获得土地'] and _G['带来树'] and _G['取基地斧头']) or tick() - tw > 60
+            if not (_G['加载'] and _G['带来树']) then
+                return fail('script not fully loaded')
+            end
+
+            -- 1. load the slot
+            local cur = LP:FindFirstChild('CurrentSaveSlot')
+            if ownedPlot() and cur and cur.Value == slot then
+                step('Slot ' .. slot .. ' already loaded')
+            else
+                step('Loading slot ' .. slot .. '...')
+                local prevFast = _G['菜单']['快速加载']
+                _G['菜单']['快速加载'] = true -- lets the plot picker hook choose a free plot
+                local loaded = false
+                task.spawn(function()
+                    pcall(_G['加载'], slot)
+                    loaded = true
+                end)
+                local tl = tick()
+                repeat task.wait(0.5) until (loaded and ownedPlot()) or tick() - tl > 180
+                _G['菜单']['快速加载'] = prevFast
+                if not ownedPlot() then
+                    return fail('slot ' .. slot .. ' did not load (no plot)')
+                end
+                step('Slot ' .. slot .. ' loaded')
+            end
+
+            -- 2. End Times Axe in hand
+            local axe = endTimesTool()
+            if not axe then
+                step('Taking End Times Axe from base...')
+                local ta = tick()
+                while not axe and tick() - ta < 60 do
+                    if endTimesInBase() then
+                        pcall(_G['取基地斧头'])
+                        task.wait(0.6)
+                    else
+                        task.wait(1) -- base items are still spawning
+                    end
+                    axe = endTimesTool()
+                end
+                if not axe then
+                    return fail('no End Times Axe in slot ' .. slot)
+                end
+            end
+            pcall(function()
+                LP.Character:FindFirstChildOfClass('Humanoid'):EquipTool(axe)
+            end)
+            step('End Times Axe in hand')
+
+            -- 3. cut the tree and bring the log to the base
+            local plot = ownedPlot()
+            if not plot then
+                return fail('lost the plot')
+            end
+            local dropCF = plot.OriginSquare.CFrame * CFrame.new(0, 6, 0)
+            step('Cutting ' .. t.class .. ' and bringing it to base...')
+            _G['菜单']['树放置的地点'] = dropCF
+            _G['菜单']['带来树起点'] = dropCF
+            _G['菜单']['选择的树'] = t.class
+            _G['菜单']['树的大小'] = 'big'
+            _G['菜单']['停止砍树'] = false
+            _G['带来树批次'] = (_G['带来树批次'] or 0) + 1
+            _G['带来树进行中'] = true
+            _G['树砍好了'] = false
+
+            -- force the End Times Axe even if other axes are in the backpack
+            local origCheck = _G['检查斧头']
+            _G['检查斧头'] = function(kind)
+                local a = endTimesTool()
+                if a then
+                    local okD, d = pcall(_G['获得工具的伤害'], a)
+                    if okD and d then
+                        local special = d.SpecialTrees and d.SpecialTrees[kind]
+                        return a, special and special.Damage or d.Damage
+                    end
+                end
+                return origCheck(kind)
+            end
+
+            local cutDone = false
+            task.spawn(function()
+                pcall(_G['带来树'], t.class)
+                cutDone = true
+            end)
+            local tc = tick()
+            while not cutDone and tick() - tc < 180 do
+                task.wait(0.5)
+            end
+            _G['检查斧头'] = origCheck
+            _G['带来树进行中'] = false
+
+            if not cutDone then
+                pcall(_G['带来树中止'])
+                return fail('cutting timed out (tree unreachable?)')
+            end
+            if not _G['树砍好了'] then
+                return fail('could not cut ' .. t.class .. ' (tree gone or taken?)')
+            end
+            task.wait(4.5) -- the log is still being dragged to the base
+            pcall(_G['传送'], dropCF)
+            step(t.class .. ' cut and brought to base (slot ' .. slot .. ')', 5763719)
+            return true
         end
 
         local function queueReload()
@@ -2844,35 +3019,65 @@ do
             return nil, 'no new servers, resetting list'
         end
 
-        local function hop()
+        local teleportFailedAt = 0
+        pcall(function()
+            TeleportService.TeleportInitFailed:Connect(function()
+                teleportFailedAt = tick()
+                if cfg.active or cfg.autoHop then setStatus('teleport failed, trying another...') end
+            end)
+        end)
+
+        -- isRunning is re-checked right before teleporting, so Stop always wins
+        local function hop(isRunning)
             local id, err = pickServer()
             if not id then
                 setStatus((err or 'no server') .. ', retry...')
                 task.wait(6)
                 return
             end
+            if isRunning and not isRunning() then return end
             table.insert(cfg.visited, id)
             while #cfg.visited > 150 do table.remove(cfg.visited, 1) end
             cfg.hops = cfg.hops + 1
             save()
             queueReload()
             setStatus(string.format('hopping #%d...', cfg.hops))
+            local started = tick()
             pcall(function()
                 TeleportService:TeleportToPlaceInstance(game.PlaceId, id, LP)
             end)
-            task.wait(20)
+            -- do not scan this server again while a teleport may still be in flight
+            while tick() - started < 30 and teleportFailedAt < started do
+                task.wait(0.5)
+            end
         end
 
-        pcall(function()
-            TeleportService.TeleportInitFailed:Connect(function()
-                if cfg.active or cfg.autoHop then setStatus('teleport failed, trying another...') end
-            end)
-        end)
+        local function treeCount()
+            local n = 0
+            for _, region in ipairs(game:GetService('Workspace'):GetChildren()) do
+                if region.Name == 'TreeRegion' then
+                    n = n + #region:GetChildren()
+                end
+            end
+            return n
+        end
 
+        -- trees stream in after join: wait until the count stops growing
         local function waitForTrees()
             local t0 = tick()
             repeat task.wait(0.5) until game:GetService('Workspace'):FindFirstChild('TreeRegion') or tick() - t0 > 20
-            task.wait(3)
+            local last, stable = -1, 0
+            local t1 = tick()
+            while stable < 3 and tick() - t1 < 12 do
+                task.wait(0.75)
+                local n = treeCount()
+                if n == last and n > 0 then
+                    stable = stable + 1
+                else
+                    stable = 0
+                    last = n
+                end
+            end
         end
 
         local function userStopsHop(foundLabel, isRunning)
@@ -2894,28 +3099,27 @@ do
             task.spawn(function()
                 repeat task.wait() until game:IsLoaded()
                 repeat task.wait() until LP.Character and LP.Character:FindFirstChild('HumanoidRootPart')
-                while cfg.active and isCurrent() and not u.IsUnloaded() do
+                local function running()
+                    return cfg.active and isCurrent() and not u.IsUnloaded()
+                end
+                while running() do
                     setStatus('checking server for ' .. table.concat(targetList(), ', ') .. '...')
                     waitForTrees()
-                    if not (cfg.active and isCurrent()) then break end
+                    if not running() then break end
                     local list = findTrees()
                     if #list > 0 then
-                        onFound(list[1])
-                        if cfg.stopFound then
-                            cfg.active = false
-                            save()
-                            setStatus('FOUND ' .. list[1].class .. ' (stopped)')
-                            return
+                        local t = list[1]
+                        -- stop and save first, so nothing (reload, queued teleport) can resume the hunt
+                        cfg.active = false
+                        save()
+                        setStatus('FOUND ' .. t.class .. ' (stopped)')
+                        onFound(t)
+                        if cfg.autoCollect then
+                            autoCollect(t, setStatus)
                         end
-                        setStatus('found ' .. list[1].class .. ', continuing...')
-                        if userStopsHop(list[1].class, function() return cfg.active and isCurrent() end) then
-                            cfg.active = false
-                            save()
-                            setStatus('stopped (you tapped Stop)')
-                            return
-                        end
+                        return
                     end
-                    hop()
+                    hop(running)
                 end
             end)
         end
@@ -2926,7 +3130,7 @@ do
                 return
             end
             if cfg.autoHop then
-                _G['提醒']('Stop Continuous Hop first')
+                _G['提醒']('Stop Scout Hop first')
                 return
             end
             if #targetList() == 0 then
@@ -2953,10 +3157,11 @@ do
             setStatus('stopped')
         end, { stopper = true })
 
-        local Hop = Finder:Section('Continuous Hop', true):SetOrder(6)
-        Hop:Label('Hunts MANY trees (pick in Trees to find)')
-        Hop:Label('On a find: notification with a Stop button, tap it within 5s to stay, or it hops on')
-        Hop:Label('Trees in Stop hop if found stop it automatically')
+        local Hop = Finder:Section('Scout Hop (keeps hopping)', true):SetOrder(6)
+        Hop:Label('For scouting and logging servers: it does NOT stop on a find.')
+        Hop:Label('Uses its own lists below, not Trees to hunt.')
+        Hop:Label('Each find: alert + webhook, then a 5s Stop button, then it hops on.')
+        Hop:Label('Only trees in Stop hop if found make it stop. No auto collect here.')
 
         local EXTRA_HINT = 'e.g. Sinister'
         local function activeClasses()
@@ -2968,21 +3173,6 @@ do
                 if not set[c] then set[c] = true; n = n + 1 end
             end
             return set, n
-        end
-
-        local function postJson(tbl)
-            if not cfg.webhookOn then return false end
-            if not cfg.webhook:match('^https://[%w%.]*discord%w*%.com/api/webhooks/') then
-                _G['提醒']('Webhook URL not set / invalid')
-                return false
-            end
-            local req = (syn and syn.request) or http_request or request or (fluxus and fluxus.request)
-            if not req then
-                _G['提醒']('Executor has no http request function')
-                return false
-            end
-            pcall(req, { Url = cfg.webhook, Method = 'POST', Headers = { ['Content-Type'] = 'application/json' }, Body = HttpService:JSONEncode(tbl) })
-            return true
         end
 
         local function sendHopWebhook(list)
@@ -3037,12 +3227,6 @@ do
                 lastSentJob = game.JobId
                 sendHopWebhook(list)
             end
-            if cfg.tpFound then
-                pcall(function() _G['传送'](list[1].part.CFrame) end)
-            end
-            if cfg.loadOn then
-                pcall(function() loadstring(game:HttpGet(SCRIPT_URL))() end)
-            end
             return label
         end
 
@@ -3051,43 +3235,48 @@ do
             task.spawn(function()
                 repeat task.wait() until game:IsLoaded()
                 repeat task.wait() until LP.Character and LP.Character:FindFirstChild('HumanoidRootPart')
+                local function running()
+                    return cfg.autoHop and isCurrent() and not u.IsUnloaded()
+                end
                 local retry = false
-                while cfg.autoHop and isCurrent() and not u.IsUnloaded() do
+                while running() do
                     if not retry then
-                        setStatus('checking server...')
+                        setStatus('scouting server...')
                         waitForTrees()
-                        if not (cfg.autoHop and isCurrent()) then break end
+                        if not running() then break end
                         local set = activeClasses()
                         local list = findTrees(function(c) return set[c] == true end, true)
-                        local label = nil
-                        local stopHere = false
                         if #list > 0 then
-                            label = onFoundMulti(list)
-                            setStatus('found ' .. label)
                             local stopSet = {}
                             for _, c in ipairs(cfg.stop) do stopSet[c] = true end
+                            local stopHere = false
                             for _, t in ipairs(list) do
                                 if stopSet[t.class] then
                                     stopHere = true
                                     break
                                 end
                             end
-                        end
-                        if stopHere then
-                            cfg.autoHop = false
-                            save()
-                            setStatus('FOUND ' .. label .. ' (stopped)')
-                            break
-                        end
-                        if userStopsHop(label) then
-                            cfg.autoHop = false
-                            save()
-                            setStatus('stopped (you tapped Stop)')
-                            break
+                            if stopHere then
+                                -- stop and save before anything else
+                                cfg.autoHop = false
+                                save()
+                            end
+                            local label = onFoundMulti(list)
+                            if stopHere then
+                                setStatus('FOUND ' .. label .. ' (stopped)')
+                                break
+                            end
+                            setStatus('found ' .. label)
+                            if userStopsHop(label) then
+                                cfg.autoHop = false
+                                save()
+                                setStatus('stopped (you tapped Stop)')
+                                break
+                            end
                         end
                     end
                     retry = true
-                    hop()
+                    hop(running)
                 end
             end)
         end
@@ -3130,13 +3319,13 @@ do
             if setclipboard and out ~= '' then setclipboard(out) end
             _G['提醒'](#order > 0 and (#order .. ' tree classes found (console + clipboard)') or 'No trees loaded yet')
         end)
-        Hop:Button('Start Continuous Hop', function()
+        Hop:Button('Start Scout Hop', function()
             if cfg.autoHop then
-                _G['提醒']('Continuous Hop already running')
+                _G['提醒']('Scout Hop already running')
                 return
             end
             if cfg.active then
-                _G['提醒']('Stop Tree Finder first')
+                _G['提醒']('Stop Hunt & Stop first')
                 return
             end
             local _, n = activeClasses()
@@ -3161,7 +3350,7 @@ do
             save()
             startAutoHop()
         end)
-        Hop:Button('Stop Continuous Hop', function()
+        Hop:Button('Stop Scout Hop', function()
             cfg.autoHop = false
             save()
             setStatus('stopped')
@@ -3888,9 +4077,52 @@ do
     _World:Toggle('Always Night', false, function(enabled)
         _G['菜单']['终日黑夜'] = enabled
     end)
-    _World:Toggle('Remove Fog', false, function(enabled)
-        _G['菜单']['消除雾'] = enabled
-    end)
+    do
+        -- The game rewrites the fog every frame (region fog), so a timed loop flickers.
+        -- Undo every write the moment it happens, and once more right before rendering.
+        local Lighting = _G['灯光']
+        local RunService = game:GetService('RunService')
+        local NO_FOG = 1000000
+        local conns = {}
+        local savedAtmos = {}
+
+        local function clearFog()
+            if Lighting.FogEnd ~= NO_FOG then Lighting.FogEnd = NO_FOG end
+            if Lighting.FogStart ~= NO_FOG - 1 then Lighting.FogStart = NO_FOG - 1 end
+            for _, a in ipairs(Lighting:GetChildren()) do
+                if a:IsA('Atmosphere') then
+                    if savedAtmos[a] == nil then savedAtmos[a] = { a.Density, a.Haze } end
+                    if a.Density ~= 0 then a.Density = 0 end
+                    if a.Haze ~= 0 then a.Haze = 0 end
+                end
+            end
+        end
+
+        local function setNoFog(on)
+            for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
+            conns = {}
+            pcall(function() RunService:UnbindFromRenderStep('RndmNoFog') end)
+            if not on then
+                for a, v in pairs(savedAtmos) do
+                    pcall(function() a.Density, a.Haze = v[1], v[2] end)
+                end
+                savedAtmos = {}
+                return
+            end
+            clearFog()
+            conns[#conns + 1] = Lighting:GetPropertyChangedSignal('FogEnd'):Connect(clearFog)
+            conns[#conns + 1] = Lighting:GetPropertyChangedSignal('FogStart'):Connect(clearFog)
+            conns[#conns + 1] = Lighting.ChildAdded:Connect(function() task.defer(clearFog) end)
+            pcall(function()
+                RunService:BindToRenderStep('RndmNoFog', Enum.RenderPriority.Last.Value + 1, clearFog)
+            end)
+        end
+
+        _World:Toggle('Remove Fog', false, function(enabled)
+            _G['菜单']['消除雾'] = enabled
+            setNoFog(enabled)
+        end)
+    end
 
     _G['灯光'].GlobalShadows = false
 
