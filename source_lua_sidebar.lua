@@ -332,7 +332,28 @@ local function MakeDraggable(topbarobject, object)
     end)
 end
 
-local Layout = { W = 520, H = 300, Side = 124, Top = 30 }
+local Layout = { W = 720, H = 460, Side = 140, Top = 30 }
+local LAYOUT_DEFAULT_W, LAYOUT_DEFAULT_H = Layout.W, Layout.H
+local LAYOUT_MIN_W, LAYOUT_MIN_H = 460, 280
+
+local function ClampLayoutSize(w, h)
+    w = tonumber(w) or LAYOUT_DEFAULT_W
+    h = tonumber(h) or LAYOUT_DEFAULT_H
+    local maxW, maxH = 1600, 1000
+    local cam = workspace.CurrentCamera
+    local vp = cam and cam.ViewportSize
+    if vp and vp.X > 100 and vp.Y > 100 then
+        maxW, maxH = vp.X - 20, vp.Y - 20
+    end
+    w = math.max(math.min(LAYOUT_MIN_W, maxW), math.min(w, maxW))
+    h = math.max(math.min(LAYOUT_MIN_H, maxH), math.min(h, maxH))
+    return math.floor(w), math.floor(h)
+end
+
+do
+    local saved = type(Settings.__ui) == "table" and Settings.__ui or {}
+    Layout.W, Layout.H = ClampLayoutSize(saved.W, saved.H)
+end
 
 local UILibrary = Instance.new("ScreenGui")
 local Main = Instance.new("ImageLabel")
@@ -449,6 +470,82 @@ TweenService:Create(Border, TweenInfo.new(0.5, Library.Theme.EasingStyle, Enum.E
 
 table.insert(Library.LibraryColorTable, Border)
 MakeDraggable(Topbar, Main)
+
+-- Window size: Library:SetSize(w, h) clamps to the screen and saves to Settings.__ui
+-- (skip the save with noSave = true while dragging). The bottom-right grip drives it.
+function Library:SetSize(w, h, noSave)
+    Layout.W, Layout.H = ClampLayoutSize(w, h)
+    if not Library.UIOpen then
+        Main.Size = UDim2.new(0, Layout.W, 0, Layout.H)
+    end
+    if not noSave then
+        Settings.__ui = { W = Layout.W, H = Layout.H }
+        SaveSettings()
+    end
+    return Layout.W, Layout.H
+end
+
+function Library:GetSize()
+    return Layout.W, Layout.H
+end
+
+function Library:ResetSize()
+    return Library:SetSize(LAYOUT_DEFAULT_W, LAYOUT_DEFAULT_H)
+end
+
+function Library:CenterWindow()
+    Main.Position = UDim2.new(0.5, -Layout.W / 2, 0.5, -Layout.H / 2)
+end
+
+do
+    local ResizeGrip = Instance.new("TextButton")
+    ResizeGrip.Name = "ResizeGrip"
+    ResizeGrip.Parent = Main
+    ResizeGrip.AnchorPoint = Vector2.new(1, 1)
+    ResizeGrip.Position = UDim2.new(1, -3, 1, -3)
+    ResizeGrip.Size = UDim2.new(0, 20, 0, 20)
+    ResizeGrip.BackgroundTransparency = 1
+    ResizeGrip.Text = ""
+    ResizeGrip.AutoButtonColor = false
+    ResizeGrip.ZIndex = 60
+
+    -- three dots in a corner triangle, the usual resize grip
+    for _, p in ipairs({ { 14, 6 }, { 14, 14 }, { 6, 14 } }) do
+        local dot = Instance.new("Frame")
+        dot.Parent = ResizeGrip
+        dot.AnchorPoint = Vector2.new(0.5, 0.5)
+        dot.Position = UDim2.new(0, p[1], 0, p[2])
+        dot.Size = UDim2.new(0, 4, 0, 4)
+        dot.BorderSizePixel = 0
+        dot.BackgroundColor3 = Library.Theme.MainColor
+        dot.BackgroundTransparency = 0.2
+        dot.ZIndex = 61
+        Instance.new("UICorner", dot).CornerRadius = UDim.new(1, 0)
+    end
+
+    local resizing, startPos, startW, startH = false, nil, 0, 0
+    ResizeGrip.InputBegan:Connect(function(input)
+        if input.UserInputType ~= Enum.UserInputType.MouseButton1 and input.UserInputType ~= Enum.UserInputType.Touch then return end
+        resizing = true
+        startPos = input.Position
+        startW, startH = Layout.W, Layout.H
+        local endConn
+        endConn = input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then
+                endConn:Disconnect()
+                resizing = false
+                Library:SetSize(Layout.W, Layout.H)
+            end
+        end)
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if not resizing then return end
+        if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+            local d = input.Position - startPos
+            Library:SetSize(startW + d.X, startH + d.Y, true)
+        end
+    end)
+end
 
 local Minimized = false
 
@@ -1140,6 +1237,11 @@ function Library:CreateTab(name, icon)
     NameTabButton.Image = ""
     NameTabButton.AutoButtonColor = false
 
+    -- sidebar position; Config/Theme tabs sit at 990/1000
+    function TabElements:SetOrder(n)
+        NameTabButton.LayoutOrder = tonumber(n) or 0
+    end
+
     Title.Name = "Title"
     Title.Parent = NameTabButton
     Title.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
@@ -1344,6 +1446,11 @@ function TabElements:CreateSection(name, collapsible, startClosed)
     NameSection.LayoutOrder = sectionOrder
     NameSection.Size = UDim2.new(1, 0, 0, 34)
     NameSection.ZIndex = 4
+
+    -- position inside the tab page (the page title uses 0)
+    function SectionElements:SetOrder(n)
+        NameSection.LayoutOrder = tonumber(n) or sectionOrder
+    end
 
     SectionTitle.Name = "SectionTitle"
     SectionTitle.Parent = NameSection

@@ -215,7 +215,26 @@ do
             ['Troll'] = 'skull',
             ['Settings'] = 'settings',
             ['Halloween'] = 'spooky',
-            
+
+        }
+
+        -- sidebar order, grouped: finding -> wood/items -> base/money -> player -> settings
+        local TabOrder = {
+            ['Home'] = 1,
+            ['Tree Finder'] = 2,
+            ['Wood'] = 3,
+            ['Items'] = 4,
+            ['AutoBuild'] = 5,
+            ['Auto Buy'] = 6,
+            ['Halloween'] = 7,
+            ['Slot'] = 8,
+            ['Dupe'] = 9,
+            ['Vehicle'] = 10,
+            ['Player'] = 11,
+            ['Teleport'] = 12,
+            ['World'] = 13,
+            ['Troll'] = 14,
+            ['Settings'] = 980,
         }
 
         local built = 0
@@ -266,6 +285,11 @@ do
 
         local function makeSection(container, tabTitle)
             local S = {}
+
+            function S:SetOrder(n)
+                pcall(function() container:SetOrder(n) end)
+                return S
+            end
 
             function S:Button(title, cb, opts)
                 breathe()
@@ -596,6 +620,7 @@ do
                 title = tostring(title):gsub('%s+$', '')
                 print('[Rndm] building tab: ' .. title)
                 local raw = Library:CreateTab(title, TabIcons[title])
+                pcall(function() raw:SetOrder(TabOrder[title] or 500) end)
                 if title == 'Settings' then
                     settingsTab = raw
                 end
@@ -613,7 +638,22 @@ do
             pcall(function()
                 if settingsTab then
                     local sec = settingsTab:CreateSection('UI')
-                    sec:CreateLabel('Info', 'idk what to say, but is just some revamped thingy..')
+                    pcall(function() sec:SetOrder(1) end)
+                    sec:CreateLabel('Window size', 'Drag the dots in the bottom-right corner to resize, or pick a preset')
+                    local function applySize(w, h)
+                        w, h = Library:SetSize(w, h)
+                        Library:CenterWindow()
+                        _G['提醒'](string.format('Window size %dx%d', w, h))
+                    end
+                    for _, p in ipairs({ { 'Small', 560, 340 }, { 'Medium', 720, 460 }, { 'Large', 880, 560 } }) do
+                        sec:CreateButton(string.format('Size: %s (%dx%d)', p[1], p[2], p[3]), function()
+                            applySize(p[2], p[3])
+                        end)
+                    end
+                    sec:CreateButton('Size: Fit screen', function()
+                        local vp = workspace.CurrentCamera.ViewportSize
+                        applySize(vp.X - 40, vp.Y - 40)
+                    end)
                     sec:CreateButton('Destroy UI', function()
                         pcall(function() libGui:Destroy() end)
                     end)
@@ -2147,10 +2187,6 @@ do
 
         local Home = window:CreateTab('Home', '')
 
-        local Credits = Home:Section('Credits')
-        Credits:Label('Updated by rndm')
-        Credits:Label('Remake of Dark V5')
-        Credits:Label("Didn't put any discord link because his link alrd expired")
 
         local Status = Home:Section('Server Status')
         local labels, lastText, lastNotify, esp = {}, {}, {}, {}
@@ -2614,7 +2650,7 @@ do
             return opts
         end
 
-        local Opt = Finder:Section('Tree Option')
+        local Opt = Finder:Section('Tree Option'):SetOrder(2)
         local huntDD = Opt:MultiDropDown('Trees to hunt', allOptions(), function(sel)
             cfg.targets = sel
             save()
@@ -2628,7 +2664,7 @@ do
             save()
         end, 1)
 
-        local Web = Finder:Section('Webhook Option')
+        local Web = Finder:Section('Webhook', true, true):SetOrder(5)
         Web:Toggle('Send webhook when found', cfg.webhookOn, function(v)
             cfg.webhookOn = v
             save()
@@ -2643,7 +2679,7 @@ do
             end
         end)
 
-        local Set = Finder:Section('Settings')
+        local Set = Finder:Section('When Found'):SetOrder(3)
         Set:Toggle('Stop hopping when found', cfg.stopFound, function(v)
             cfg.stopFound = v
             save()
@@ -2657,7 +2693,7 @@ do
             save()
         end)
 
-        local Snd = Finder:Section('Sound Alert', true)
+        local Snd = Finder:Section('Sound Alert', true):SetOrder(4)
         Snd:Toggle('Play sound when found', cfg.soundOn, function(v)
             cfg.soundOn = v
             save()
@@ -2671,7 +2707,7 @@ do
             playAlert()
         end)
 
-        local Run = Finder:Section('Tree Finder')
+        local Run = Finder:Section('Tree Finder'):SetOrder(1)
         Run:Label('Hunts only the trees in Trees to hunt')
         Run:Label('Hops servers until found, then stops (see Settings)')
         Run:Label('If it keeps hopping, a Stop notification shows first')
@@ -2917,7 +2953,7 @@ do
             setStatus('stopped')
         end, { stopper = true })
 
-        local Hop = Finder:Section('Continuous Hop', true)
+        local Hop = Finder:Section('Continuous Hop', true):SetOrder(6)
         Hop:Label('Hunts MANY trees (pick in Trees to find)')
         Hop:Label('On a find: notification with a Stop button, tap it within 5s to stay, or it hops on')
         Hop:Label('Trees in Stop hop if found stop it automatically')
@@ -3662,7 +3698,7 @@ do
         end
     end)
 
-    local _funny = _Player:Section('funny')
+    local _funny = _Player:Section('Fun')
 
     _funny:Toggle('Fire', false, function(enabled)
         if enabled then
@@ -8017,7 +8053,7 @@ do
         end)
     end)
 
-    local _selectItem = _Items:Section('select Item')
+    local _selectItem = _Items:Section('Select Item')
 
     _G['点击选择物品'] = nil
 
@@ -9392,7 +9428,7 @@ do
     end)
 
     local loadstring2 = nil
-    local _wireart = _AutoBuild:Section('wire art')
+    local _wireart = _AutoBuild:Section('Wire Art')
 
     _wireart:TextBox('Url', '', function(text)
         loadstring2 = loadstring(game:HttpGet(text))()
@@ -9803,7 +9839,7 @@ do
         end
     end
 
-    local _Player3 = window:CreateTab('Troll', '8769279408'):Section('Player')
+    local _Player3 = window:CreateTab('Troll', '8769279408'):Section('Target Player')
 
     _Player3:DropDown('Select the player', {}, true, false, function(option)
         _G['菜单']['杀死的玩家'] = option
@@ -9831,7 +9867,7 @@ do
     end)
 
     local _Settings = window:CreateTab('Settings', '6031280882')
-    local _Util = _Settings:Section('Utility')
+    local _Util = _Settings:Section('Utility'):SetOrder(2)
     Library:CreateConfigTab()
     Library:CreateThemeTab()
 
@@ -9935,11 +9971,11 @@ do
         _G['提醒']('Panic: everything stopped (' .. tostring(n) .. ' features turned off)')
     end)
 
-    local _Credits = _Settings:Section('Credits')
+    local _Credits = _Settings:Section('Credits'):SetOrder(9)
     _Credits:Label('Made by Rndm')
 
     
-    local _Server = _Settings:Section('Server')
+    local _Server = _Settings:Section('Server'):SetOrder(3)
     local TeleportService = game:GetService('TeleportService')
 
     _Server:Button('Rejoin server', function()
@@ -10014,7 +10050,7 @@ do
     end)
 
     do
-        local Srv = _Settings:Section('Server ID', true)
+        local Srv = _Settings:Section('Server ID', true):SetOrder(4)
         Srv:Button('Copy Server ID', function()
             local id = u.EncodeServerId(game.JobId) or game.JobId
             if setclipboard then
