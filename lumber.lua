@@ -187,7 +187,7 @@ do
             getgenv().SaveFile = 'DarkX.json'
         end
 
-        local Library = loadstring(game:HttpGet('https://raw.githubusercontent.com/rndmq/Serverlist/refs/heads/main/source_lua_sidebar.lua'))()
+        local Library = loadstring(game:HttpGet('https://raw.githubusercontent.com/zVitorSantos/teste/refs/heads/main/source_lua_sidebar.lua'))()
 
         
         local libGui = nil
