@@ -60,34 +60,6 @@ end)
 
 do
     wait(0.2)
-    spawn(function()
-        local nextFn = next
-        local guis, startKey = _G['自己'].PlayerGui:GetChildren()
-
-        for _, gui in nextFn, guis, startKey do
-            if gui.Name ~= 'Chat' then
-                if gui.Name ~= 'TargetGui' then
-                    local nextFn2 = next
-                    local descendants, startKey2 = gui:GetDescendants()
-
-                    for _, desc in nextFn2, descendants, startKey2 do
-                        Instance.new('UICorner', desc).CornerRadius = UDim.new(0, 5)
-
-                        if desc.Name == 'DropShadow' then
-                            desc:Destroy()
-                        end
-                        if desc:IsA('TextButton') or desc:IsA('Frame') or desc:IsA('ScrollingFrame') then
-                            desc.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
-                        end
-                        if desc:IsA('TextLabel') or desc:IsA('TextButton') or desc:IsA('TextBox') then
-                            desc.TextColor3 = Color3.fromRGB(225, 225, 225)
-                            desc.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
-                        end
-                    end
-                end
-            end
-        end
-    end)
     game:GetService('ReplicatedStorage'):WaitForChild('LoadSaveRequests'):WaitForChild('GetMetaData'):InvokeServer(_G['自己'])
     game:GetService('Players').LocalPlayer:GetMouse()
 
@@ -208,6 +180,7 @@ do
             ['Slot'] = 'save',
             ['Dupe'] = 'copy',
             ['Auto Buy'] = 'shopping-cart',
+            ['Shop'] = 'store',
             ['Pumpkin'] = 'shopping-bag',
             ['Items'] = 'package',
             ['Vehicle'] = 'car',
@@ -225,15 +198,16 @@ do
             ['Wood'] = 3,
             ['Items'] = 4,
             ['AutoBuild'] = 5,
-            ['Auto Buy'] = 6,
-            ['Halloween'] = 7,
-            ['Slot'] = 8,
-            ['Dupe'] = 9,
-            ['Vehicle'] = 10,
-            ['Player'] = 11,
-            ['Teleport'] = 12,
-            ['World'] = 13,
-            ['Troll'] = 14,
+            ['Shop'] = 6,
+            ['Auto Buy'] = 7,
+            ['Halloween'] = 8,
+            ['Slot'] = 9,
+            ['Dupe'] = 10,
+            ['Vehicle'] = 11,
+            ['Player'] = 12,
+            ['Teleport'] = 13,
+            ['World'] = 14,
+            ['Troll'] = 15,
             ['Settings'] = 980,
         }
 
@@ -1187,130 +1161,196 @@ do
         })
     end
 
-    game.Workspace.ChildAdded:Connect(function(child)
-        if child:IsA('Part') and (child:WaitForChild('BodyPosition', 5) and child:WaitForChild('BodyGyro', 5)) then
-            if _G['菜单']['大力'] then
-                child.BrickColor = BrickColor.new('Really red')
+    -- Hard Dragger: boosts the game's own drag part (a part with BodyPosition + BodyGyro)
+    -- while you hold an item. Off = the game's drag is left exactly as the game made it.
+    do
+        local RS = game:GetService('RunService')
+        local HUGE = Vector3.new(math.huge, math.huge, math.huge)
+        local LIGHT = PhysicalProperties.new(0.01, 0.3, 0, 1, 1)
+        local CLAIM_INTERVAL = 0.12
+        local SCAN_INTERVAL = 0.2
+        local current = nil
+        local boostToken = 0
 
-                local bodyPosition = child:WaitForChild('BodyPosition')
-                local bodyGyro = child:WaitForChild('BodyGyro')
+        _G['硬拖力度'] = _G['硬拖力度'] or 5
+        _G['硬拖穿墙'] = _G['硬拖穿墙'] or false
 
-                task.spawn(function()
-                    local RS = game:GetService('RunService')
-                    local dragRemote = game:GetService('ReplicatedStorage').Interaction.ClientIsDragging
-                    local lp = _G['自己']
+        local function movers(p)
+            return p:FindFirstChildOfClass('BodyPosition'), p:FindFirstChildOfClass('BodyGyro')
+        end
 
-                    
-                    local POS_P, POS_D = 1000000, 8000     
-                    local GYRO_P, GYRO_D = 20000, 1500     
-                    local CLAIM_INTERVAL = 0.12            
-                    local SCAN_INTERVAL = 0.2              
-                    
+        local function power()
+            local v = nil
+            pcall(function() v = getgenv().RndmHardDragPower end)
+            return math.clamp(math.floor(tonumber(v) or tonumber(_G['硬拖力度']) or 5), 1, 10)
+        end
 
-                    local HUGE = Vector3.new(math.huge, math.huge, math.huge)
-                    local original = {}
-                    local conns = {}
-                    local models = {}
-                    local applying = false
+        local function boost(dragPart)
+            boostToken = boostToken + 1
+            local my = boostToken
+            local bp, bg = movers(dragPart)
+            if not (bp and bg) then
+                return
+            end
 
-                    
-                    local function strengthen()
-                        if applying then
-                            return
-                        end
-                        applying = true
-                        pcall(function()
-                            if bodyPosition.P ~= POS_P then bodyPosition.P = POS_P end
-                            if bodyPosition.D ~= POS_D then bodyPosition.D = POS_D end
-                            if bodyPosition.MaxForce ~= HUGE then bodyPosition.MaxForce = HUGE end
-                            if bodyGyro.P ~= GYRO_P then bodyGyro.P = GYRO_P end
-                            if bodyGyro.D ~= GYRO_D then bodyGyro.D = GYRO_D end
-                            if bodyGyro.MaxTorque ~= HUGE then bodyGyro.MaxTorque = HUGE end
-                        end)
-                        applying = false
-                    end
+            local dragRemote = game:GetService('ReplicatedStorage').Interaction.ClientIsDragging
+            local lp = _G['自己']
+            local orig = { bp.P, bp.D, bp.MaxForce, bg.P, bg.D, bg.MaxTorque }
+            local physOrig, collideOrig = {}, {}
+            local models = {}
+            local conns = {}
+            local applying = false
 
-                    
-                    for _, inst in ipairs({ bodyPosition, bodyGyro }) do
-                        for _, prop in ipairs(inst == bodyPosition and { 'P', 'D', 'MaxForce' } or { 'P', 'D', 'MaxTorque' }) do
-                            table.insert(conns, inst:GetPropertyChangedSignal(prop):Connect(strengthen))
-                        end
-                    end
+            local function alive()
+                return my == boostToken and dragPart.Parent ~= nil and _G['菜单']['大力'] == true
+            end
 
-                    
-                    table.insert(conns, RS.Heartbeat:Connect(strengthen))
-
-                    local lastScan, lastClaim = 0, 0
-
-                    while child.Parent and _G['菜单']['大力'] do
-                        strengthen()
-
-                        local now = os.clock()
-
-                        
-                        if now - lastScan >= SCAN_INTERVAL then
-                            lastScan = now
-                            local ok, parts = pcall(function() return child:GetConnectedParts(true) end)
-                            if ok then
-                                table.clear(models)
-                                for _, part in ipairs(parts) do
-                                    if part ~= child then
-                                        if original[part] == nil then
-                                            original[part] = { part.CustomPhysicalProperties }
-                                            part.CustomPhysicalProperties = PhysicalProperties.new(0.01, 0.3, 0, 1, 1)
-                                        end
-
-                                        local model = part:FindFirstAncestorOfClass('Model')
-                                        if model and model ~= lp.Character and not model:FindFirstChildOfClass('Humanoid') then
-                                            models[model] = true
-                                        end
-                                    end
-                                end
-                            end
-                        end
-
-                        
-                        if now - lastClaim >= CLAIM_INTERVAL then
-                            lastClaim = now
-                            for model in pairs(models) do
-                                if model.Parent then
-                                    local main = model.PrimaryPart or model:FindFirstChildWhichIsA('BasePart')
-                                    local owned = true
-                                    if isnetworkowner and main then
-                                        local okOwn, res = pcall(isnetworkowner, main)
-                                        owned = okOwn and res
-                                    end
-                                    if not owned then
-                                        pcall(function() dragRemote:FireServer(model) end)
-                                    end
-                                else
-                                    models[model] = nil
-                                end
-                            end
-                        end
-
-                        RS.Stepped:Wait()
-                    end
-
-                    for _, c in ipairs(conns) do
-                        pcall(function() c:Disconnect() end)
-                    end
-
-                    for part, props in pairs(original) do
-                        pcall(function() part.CustomPhysicalProperties = props[1] end)
-                    end
+            -- 1..10 maps to 20k..200k position power; damping keeps it from shaking
+            local function apply()
+                if applying then return end
+                applying = true
+                pcall(function()
+                    local k = power()
+                    local posP, gyroP = 20000 * k, 3000 * k
+                    local posD, gyroD = posP / 40, gyroP / 10
+                    if bp.P ~= posP then bp.P = posP end
+                    if bp.D ~= posD then bp.D = posD end
+                    if bp.MaxForce ~= HUGE then bp.MaxForce = HUGE end
+                    if bg.P ~= gyroP then bg.P = gyroP end
+                    if bg.D ~= gyroD then bg.D = gyroD end
+                    if bg.MaxTorque ~= HUGE then bg.MaxTorque = HUGE end
                 end)
-            else
-                child.BrickColor = BrickColor.new('Deep blue')
-                child:WaitForChild('BodyPosition').P = 10000
-                child:WaitForChild('BodyPosition').D = 800
-                child:WaitForChild('BodyPosition').MaxForce = Vector3.new(1, 1, 1) * 17000
-                child:WaitForChild('BodyGyro').P = 1200
-                child:WaitForChild('BodyGyro').D = 140
-                child:WaitForChild('BodyGyro').MaxTorque = Vector3.new(1, 1, 1) * 200
+                applying = false
+            end
+
+            -- the game rewrites these while dragging; put ours back immediately
+            for _, prop in ipairs({ 'P', 'D', 'MaxForce' }) do
+                table.insert(conns, bp:GetPropertyChangedSignal(prop):Connect(apply))
+            end
+            for _, prop in ipairs({ 'P', 'D', 'MaxTorque' }) do
+                table.insert(conns, bg:GetPropertyChangedSignal(prop):Connect(apply))
+            end
+            table.insert(conns, RS.Heartbeat:Connect(apply))
+
+            local lastScan, lastClaim = 0, 0
+            while alive() do
+                local now = os.clock()
+
+                if now - lastScan >= SCAN_INTERVAL then
+                    lastScan = now
+                    local ok, parts = pcall(function() return dragPart:GetConnectedParts(true) end)
+                    if ok then
+                        table.clear(models)
+                        for _, part in ipairs(parts) do
+                            if part ~= dragPart then
+                                if physOrig[part] == nil then
+                                    physOrig[part] = { part.CustomPhysicalProperties }
+                                    pcall(function() part.CustomPhysicalProperties = LIGHT end)
+                                end
+                                if _G['硬拖穿墙'] then
+                                    if collideOrig[part] == nil then
+                                        collideOrig[part] = part.CanCollide
+                                    end
+                                    if part.CanCollide then part.CanCollide = false end
+                                elseif collideOrig[part] ~= nil then
+                                    pcall(function() part.CanCollide = collideOrig[part] end)
+                                    collideOrig[part] = nil
+                                end
+                                local model = part:FindFirstAncestorOfClass('Model')
+                                if model and model ~= lp.Character and not model:FindFirstChildOfClass('Humanoid') then
+                                    models[model] = true
+                                end
+                            end
+                        end
+                    end
+                end
+
+                -- keep network ownership so the server does not snap the item back
+                if now - lastClaim >= CLAIM_INTERVAL then
+                    lastClaim = now
+                    for model in pairs(models) do
+                        if model.Parent then
+                            local main = model.PrimaryPart or model:FindFirstChildWhichIsA('BasePart')
+                            local owned = true
+                            if isnetworkowner and main then
+                                local okOwn, res = pcall(isnetworkowner, main)
+                                owned = okOwn and res
+                            end
+                            if not owned then
+                                pcall(function() dragRemote:FireServer(model) end)
+                            end
+                        else
+                            models[model] = nil
+                        end
+                    end
+                end
+
+                RS.Stepped:Wait()
+            end
+
+            for _, c in ipairs(conns) do
+                pcall(function() c:Disconnect() end)
+            end
+            -- turned off mid-drag: give the game its own values back
+            if dragPart.Parent then
+                pcall(function()
+                    bp.P, bp.D, bp.MaxForce = orig[1], orig[2], orig[3]
+                    bg.P, bg.D, bg.MaxTorque = orig[4], orig[5], orig[6]
+                end)
+            end
+            for part, props in pairs(physOrig) do
+                pcall(function() part.CustomPhysicalProperties = props[1] end)
+            end
+            for part, was in pairs(collideOrig) do
+                pcall(function() part.CanCollide = was end)
             end
         end
-    end)
+
+        local function onDragPart(p)
+            current = p
+            if _G['菜单']['大力'] then
+                task.spawn(boost, p)
+            end
+        end
+
+        -- the movers are parented right after the part, so watch its children briefly
+        -- instead of yielding on every part that lands in Workspace
+        game.Workspace.ChildAdded:Connect(function(child)
+            if not child:IsA('BasePart') then
+                return
+            end
+            local bp, bg = movers(child)
+            if bp and bg then
+                return onDragPart(child)
+            end
+            local conn
+            conn = child.ChildAdded:Connect(function()
+                local a, b = movers(child)
+                if a and b and conn then
+                    conn:Disconnect()
+                    conn = nil
+                    onDragPart(child)
+                end
+            end)
+            task.delay(2, function()
+                if conn then
+                    conn:Disconnect()
+                    conn = nil
+                end
+            end)
+        end)
+
+        _G['硬拖开关'] = function(on)
+            _G['菜单']['大力'] = on and true or false
+            if on then
+                if current and current.Parent then
+                    task.spawn(boost, current)
+                end
+            else
+                boostToken = boostToken + 1
+            end
+        end
+    end
 
     _G['自己克隆的方块'] = nil
 
@@ -5199,8 +5239,14 @@ do
         _G['自动砍'](enabled)
     end)
     _Player2:Toggle('Hard Dragger', false, function(enabled)
-        _G['菜单']['大力'] = enabled
-    end)
+        _G['硬拖开关'](enabled)
+    end, 'While you drag: the item gets much stronger pull and almost no weight,\nand stays yours on the server. Works on the item you are holding right now too.\nOff leaves the normal game drag untouched.')
+    _Player2:Slider('Hard Dragger power', 5, 1, 10, false, function(v)
+        _G['硬拖力度'] = v
+    end, 'RndmHardDragPower')
+    _Player2:Toggle('Drag through walls', false, function(enabled)
+        _G['硬拖穿墙'] = enabled
+    end, 'Needs Hard Dragger on. The item you drag passes through walls and props.')
     _Misc:Toggle('View phantom tree', false, function(enabled)
         if enabled then
             local nextFn3 = next
@@ -7783,6 +7829,191 @@ do
 
             _G['自己身体'].PlatformStand = false
         end)
+    end
+
+    -- Shop: every store's shelf as one-tap buy buttons. Uses the same buyer as Auto Buy
+    -- (box to the counter, pay the clerk, box back to you), so Abort there stops this too.
+    do
+        local Shop = window:CreateTab('Shop', '')
+        local STORES = {
+            { 'WoodRUs', 'Wood R Us' },
+            { 'ShackShop', "Bob's Shack" },
+            { 'FurnitureStore', 'Fancy Furnishings' },
+            { 'CarStore', 'Boxed Cars' },
+            { 'FineArt', 'Fine Arts Shop' },
+            { 'LogicStore', "Link's Logic" },
+        }
+        local amount = 1
+        local deliver = 'Where I stand'
+        local autoOpen = false
+
+        local function money()
+            local m = 0
+            pcall(function() m = _G['自己'].leaderstats.Money.Value end)
+            return m
+        end
+
+        local function fmtMoney(n)
+            local str = tostring(math.floor(tonumber(n) or 0))
+            local r = str:reverse():gsub('(%d%d%d)', '%1,'):reverse()
+            return (r:gsub('^,', ''))
+        end
+
+        local function prettyName(n)
+            local info = game.ReplicatedStorage:FindFirstChild('ClientItemInfo')
+            local it = info and info:FindFirstChild(n)
+            local v = it and it:FindFirstChild('ItemName')
+            if v and v:IsA('StringValue') and v.Value ~= '' then
+                return v.Value
+            end
+            return (tostring(n):gsub('(%l)(%u)', '%1 %2'))
+        end
+
+        local function ownedPlot()
+            for _, p in ipairs(game.Workspace.Properties:GetChildren()) do
+                local o = p:FindFirstChild('Owner')
+                if o and o.Value == _G['自己'] and p:FindFirstChild('OriginSquare') then
+                    return p
+                end
+            end
+            return nil
+        end
+
+        local Top = Shop:Section('Buy from stores'):SetOrder(1)
+        Top:Label('Tap an item below to buy it. The box is carried to the counter, paid and brought back.')
+        Top:Label('Same buyer as the Auto Buy tab: one purchase at a time.')
+        local status = Top:Label('Status : idle')
+        local moneyLabel = Top:Label('Money : -')
+        Top:NumberInput('Amount per tap', 1, 1, 999, function(n)
+            amount = math.max(1, math.floor(n))
+        end, 1)
+        Top:DropDown('Deliver to', { 'Where I stand', 'My base', 'Auto Buy box location' }, false, false, function(v)
+            deliver = v
+        end, 'Where I stand')
+        Top:Toggle('Open boxes after delivery', false, function(v)
+            autoOpen = v
+        end, 'Opens every box bought by that tap once it has been delivered.')
+        Top:Button('Stop buying', function()
+            _G['菜单']['自动购买停止'] = true
+            status.Text = 'Status : stopping...'
+        end, { stopper = true })
+
+        task.spawn(function()
+            while not u.IsUnloaded() do
+                moneyLabel.Text = 'Money : $' .. fmtMoney(money())
+                task.wait(1)
+            end
+        end)
+
+        local function destination(origin)
+            if deliver == 'My base' then
+                local plot = ownedPlot()
+                if plot then
+                    return plot.OriginSquare.CFrame * CFrame.new(0, 4, 0), true
+                end
+                _G['提醒']('No base loaded, delivering where you stand')
+            elseif deliver == 'Auto Buy box location' then
+                local pin = _G['菜单']['自动购买箱子地点']
+                if pin then
+                    return pin, true
+                end
+                _G['提醒']('No box location set in Auto Buy, delivering where you stand')
+            end
+            return origin, false
+        end
+
+        local function buy(item, store)
+            if _G.BuyRunning then
+                return _G['提醒']('Already buying, wait or press Stop buying')
+            end
+            if not _G['自动购买v2'] then
+                return _G['提醒']('Buyer not loaded yet')
+            end
+            local n = amount
+            local price = tonumber(_G['商品价格'](item, n)) or 0
+            if price > money() then
+                return _G['提醒'](string.format('Not enough money: %s x%d costs $%s', prettyName(item), n, fmtMoney(price)))
+            end
+
+            task.spawn(function()
+                local origin = _G['自己的方块'].CFrame
+                local dest, anchor = destination(origin)
+
+                -- remember this tap's boxes so only those get opened
+                local boxes = {}
+                local watch = game.Workspace.PlayerModels.ChildAdded:Connect(function(child)
+                    task.spawn(function()
+                        local ov = child:WaitForChild('Owner', 5)
+                        local pv = child:WaitForChild('PurchasedBoxItemName', 5)
+                        if not (ov and pv) then return end
+                        for _ = 1, 20 do
+                            if ov.Value == _G['自己'] and pv.Value == item then
+                                boxes[#boxes + 1] = child
+                                return
+                            end
+                            task.wait(0.1)
+                        end
+                    end)
+                end)
+
+                status.Text = string.format('Status : buying %s x%d ($%s)...', prettyName(item), n, fmtMoney(price))
+                _G['菜单']['自动购买停止'] = false
+                _G['菜单']['自动购买的地点'] = dest
+                _G['菜单']['自动购买用锚点'] = anchor
+                local ok, err = pcall(_G['自动购买v2'], item, n, nil, store)
+                _G['菜单']['自动购买用锚点'] = false
+                task.wait(0.5)
+                pcall(function() watch:Disconnect() end)
+
+                if autoOpen then
+                    for _, box in ipairs(boxes) do
+                        if box.Parent then
+                            pcall(function()
+                                game.ReplicatedStorage.Interaction.ClientInteracted:FireServer(box, 'Open box')
+                            end)
+                            task.wait(0.15)
+                        end
+                    end
+                end
+
+                pcall(_G['传送'], origin)
+                local prog = _G.BuyProgress
+                local got = (prog and prog.item == item) and prog.bought or 0
+                if ok then
+                    status.Text = string.format('Status : %s %d/%d bought', prettyName(item), got, n)
+                else
+                    status.Text = 'Status : error ' .. tostring(err)
+                end
+            end)
+        end
+
+        local order = 2
+        for _, st in ipairs(STORES) do
+            local key, label = st[1], st[2]
+            if game.Workspace.Stores:FindFirstChild(key) then
+                local ok, items = pcall(_G['获得商店物品'], key)
+                if ok and type(items) == 'table' and #items > 0 then
+                    local prices = {}
+                    for _, it in ipairs(items) do
+                        prices[it] = tonumber(_G['商品价格'](it, 1)) or 0
+                    end
+                    table.sort(items, function(a, b)
+                        if prices[a] ~= prices[b] then return prices[a] < prices[b] end
+                        return a < b
+                    end)
+                    local sec = Shop:Section(string.format('%s (%d)', label, #items), true, order > 2):SetOrder(order)
+                    order = order + 1
+                    for _, it in ipairs(items) do
+                        sec:Button(string.format('%s  -  $%s', prettyName(it), fmtMoney(prices[it])), function()
+                            buy(it, key)
+                        end)
+                    end
+                end
+            end
+        end
+        if order == 2 then
+            Top:Label('No store shelves found yet. Rejoin or wait for the map to load.')
+        end
     end
 
     do
