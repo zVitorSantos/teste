@@ -1,16 +1,4 @@
 print('loading')
--- If you trying to skid, please give credit into your ui or your Script pages.
--- I can take down ur script if u just skid and didn't give any credit for it.
--- It is indeed from Dark X V5.0, but revamped. Feel free to take the script if u want. but gip me some credit too? :>
-
---[[
-Copyright (c) 2026 Rndm.
-software and associated documentation files.
-
-THE FOLLOWING CONDITIONS MUST BE MET:
-1. You must include the original copyright notice and permission notice in all copies or substantial portions of the Software.
-2. Credit must be placed anywhere within the script, user interface, or documentation, provided it is CLEARLY VISIBLE to the end-user.
-]]
 
 repeat
     wait(0.1)
@@ -1423,6 +1411,40 @@ do
     end
 
     _G['带来树取斧中'] = false
+
+    -- Picks up a dropped tool model (e.g. the End Times Axe you dropped by dying).
+    -- Waits for respawn, stands next to it and retries: the server ignores pickups from far away.
+    _G['捡回斧头'] = function(m, timeout)
+        timeout = timeout or 12
+        local pm = Workspace:FindFirstChild('PlayerModels')
+        local t0 = tick()
+        repeat
+            task.wait(0.1)
+        until (_G['自己角色'] and _G['自己角色'].Parent and _G['自己角色']:FindFirstChild('HumanoidRootPart') and _G['自己身体'] and _G['自己身体'].Health > 20) or tick() - t0 > 25
+
+        local function onGround()
+            return m.Parent ~= nil and pm ~= nil and m:IsDescendantOf(pm)
+        end
+
+        _G['带来树取斧中'] = true
+        local t1 = tick()
+        while onGround() and tick() - t1 < timeout do
+            local part = m:FindFirstChild('Main') or m:FindFirstChildWhichIsA('BasePart')
+            if not part then break end
+            pcall(function()
+                _G['传送'](part.CFrame + Vector3.new(0, 3, 0))
+            end)
+            task.wait(0.25)
+            pcall(function()
+                game:GetService('ReplicatedStorage').Interaction.ClientInteracted:FireServer(m, 'Pick up tool')
+            end)
+            local t2 = tick()
+            repeat task.wait(0.1) until not onGround() or tick() - t2 > 0.8
+        end
+        _G['带来树取斧中'] = false
+        return not onGround()
+    end
+
     _G['取基地斧头'] = function(allow)
         local pm = Workspace:FindFirstChild('PlayerModels')
         if not pm then return false end
@@ -1431,19 +1453,8 @@ do
             local tn = m:FindFirstChild('ToolName')
             local ow = m:FindFirstChild('Owner')
             if tn and ow and tostring(tn.Value) == 'EndTimesAxe' and ow.Value == _G['自己'] and (not allow or allow[m]) then
-                local part = m:FindFirstChild('Main') or m:FindFirstChildWhichIsA('BasePart')
-                if part then
-                    _G['带来树取斧中'] = true
-                    pcall(function()
-                        _G['传送'](part.CFrame + Vector3.new(0, 4, 0))
-                    end)
-                    task.wait(0.4)
-                    pcall(function()
-                        game:GetService('ReplicatedStorage').Interaction.ClientInteracted:FireServer(m, 'Pick up tool')
-                    end)
-                    task.wait(0.4)
-                    _G['带来树取斧中'] = false
-                    return true
+                if m:FindFirstChild('Main') or m:FindFirstChildWhichIsA('BasePart') then
+                    return _G['捡回斧头'](m, 8)
                 end
             end
         end
@@ -1604,19 +1615,24 @@ do
         _G['树加入'] = treeConn
 
         if _G['树的种类'] == 'LoneCave' then
+            -- the End Times Axe drops when you die in the cave: go get it back after respawn
             value4 = game.Workspace.PlayerModels.ChildAdded:Connect(function(child)
-                child:WaitForChild('Owner')
-
-                if child:FindFirstChild('ToolName') and (tostring(child.ToolName.Value) == 'EndTimesAxe' and child:WaitForChild('Owner').Value == _G['自己']) then
-                    repeat
-                        wait()
-                    until _G['自己角色']:FindFirstChild('Head') and 20 <= _G['自己身体'].Health
-
-                    wait(0.1)
-                    game:GetService('ReplicatedStorage'):WaitForChild('Interaction'):WaitForChild('ClientInteracted'):FireServer(unpack({
-                        child,
-                        'Pick up tool',
-                    }))
+                local ow = child:WaitForChild('Owner', 10)
+                local tn = child:WaitForChild('ToolName', 10)
+                if not (ow and tn) or tostring(tn.Value) ~= 'EndTimesAxe' then
+                    return
+                end
+                local t0 = tick()
+                while ow.Value == nil and tick() - t0 < 2 do
+                    task.wait(0.1)
+                end
+                if ow.Value ~= _G['自己'] then
+                    return
+                end
+                if _G['捡回斧头'](child, 15) then
+                    _G['提醒']('End Times Axe recovered')
+                else
+                    _G['提醒']('Could not pick the End Times Axe back up')
                 end
             end)
 
@@ -1737,13 +1753,15 @@ do
                         end
                     end
 
-                    if not gotAxe and _G['菜单']['基地斧头'] then
-                        local dropped = findDroppedAxe()
-                        if dropped then
-                            pcall(function()
-                                game:GetService('ReplicatedStorage').Interaction.ClientInteracted:FireServer(dropped, 'Pick up tool')
-                            end)
-                        elseif tick() - t0 >= 2 then
+                    -- your own dropped axe is always picked back up; the base one only with the toggle
+                    local dropped = not gotAxe and findDroppedAxe()
+                    if dropped then
+                        if _G['捡回斧头'](dropped, 12) then
+                            _G['提醒']('Picked your End Times Axe back up')
+                            lastCheck = -10
+                        end
+                    elseif not gotAxe and _G['菜单']['基地斧头'] then
+                        if tick() - t0 >= 2 then
                             if _G['取基地斧头'](baseAxes) then
                                 _G['提醒']('Axe gone, took End Times Axe from base')
                                 lastCheck = -10
@@ -2696,7 +2714,9 @@ do
             cfg.size = v
             save()
         end, cfg.size)
-        Opt:NumberInput('Small/Big limit (sections)', tonumber(cfg.limit) or 1, 1, 1000, function(n)
+        Opt:Label('Tree Size counts WoodSections (trunk + branch pieces), not thickness.')
+        Opt:Label('Small = sections <= limit, Big = sections > limit. Any ignores the limit.')
+        Opt:NumberInput('Size limit (sections)', tonumber(cfg.limit) or 1, 1, 1000, function(n)
             cfg.limit = math.floor(n)
             save()
         end, 1)
@@ -2761,9 +2781,10 @@ do
             return table.find(targetList(), class) ~= nil
         end
 
+        -- returns matching trees (biggest first) and the target trees the size filter rejected
         local function findTrees(matcher, ignoreSize)
             matcher = matcher or matchesType
-            local list = {}
+            local list, skipped = {}, {}
             local seen = 0
             for _, region in ipairs(game:GetService('Workspace'):GetChildren()) do
                 if region.Name == 'TreeRegion' then
@@ -2784,18 +2805,21 @@ do
                                         intact = true
                                     end
                                 end
-                                local ok = intact and (ignoreSize or (cfg.size == 'Any')
+                                local sizeOk = ignoreSize or (cfg.size == 'Any')
                                     or (cfg.size == 'Small' and n <= cfg.limit)
-                                    or (cfg.size == 'Big' and n > cfg.limit))
-                                if ok then
+                                    or (cfg.size == 'Big' and n > cfg.limit)
+                                if intact and sizeOk then
                                     table.insert(list, { model = m, class = tostring(tc.Value), sections = n, part = ws })
+                                elseif intact then
+                                    table.insert(skipped, { class = tostring(tc.Value), sections = n })
                                 end
                             end
                         end
                     end
                 end
             end
-            return list
+            table.sort(list, function(a, b) return a.sections > b.sections end)
+            return list, skipped
         end
 
         local function postJson(tbl)
@@ -2895,12 +2919,14 @@ do
             return nil
         end
 
-        local function autoCollect(t, setStatus)
+        -- testOnly: run steps 1 and 2 (slot + axe) without a tree, from the test button
+        local function autoCollect(t, setStatus, testOnly)
             local slot = math.clamp(math.floor(tonumber(cfg.baseSlot) or 1), 1, 6)
             local title = 'Auto collect: ' .. t.class
             local function step(msg, color)
                 setStatus(msg)
                 _G['提醒'](msg)
+                print('[Rndm] ' .. title .. ' | ' .. msg)
                 webhookStep(title, msg, color)
             end
             local function fail(msg)
@@ -2915,25 +2941,78 @@ do
                 return fail('script not fully loaded')
             end
 
-            -- 1. load the slot
+            -- 1. load the slot. The game's flow: RequestLoad -> the game opens its plot picker
+            -- (a preview StructureModel in Workspace.Effects) -> the client confirms a plot with
+            -- ClientPurchasedProperty. Fast Load's hook skips the picker, so it is kept off here.
             local cur = LP:FindFirstChild('CurrentSaveSlot')
             if ownedPlot() and cur and cur.Value == slot then
                 step('Slot ' .. slot .. ' already loaded')
             else
+                local rs = game:GetService('ReplicatedStorage')
+                local function mayLoad()
+                    local ok, res = pcall(function()
+                        return rs.LoadSaveRequests.ClientMayLoad:InvokeServer(LP)
+                    end)
+                    return ok and res
+                end
+                if not mayLoad() then
+                    step('Load is on cooldown, waiting...')
+                    local tc = tick()
+                    repeat task.wait(1) until mayLoad() or tick() - tc > 150
+                    if not mayLoad() then
+                        return fail('load cooldown did not end')
+                    end
+                end
+
                 step('Loading slot ' .. slot .. '...')
                 local prevFast = _G['菜单']['快速加载']
-                _G['菜单']['快速加载'] = true -- lets the plot picker hook choose a free plot
-                local loaded = false
+                _G['菜单']['快速加载'] = false
+                local loaded, loadErr = false, nil
                 task.spawn(function()
-                    pcall(_G['加载'], slot)
+                    local ok, e = pcall(function()
+                        rs.LoadSaveRequests.RequestLoad:InvokeServer(slot, LP)
+                    end)
+                    if not ok then loadErr = e end
                     loaded = true
                 end)
-                local tl = tick()
-                repeat task.wait(0.5) until (loaded and ownedPlot()) or tick() - tl > 180
-                _G['菜单']['快速加载'] = prevFast
-                if not ownedPlot() then
-                    return fail('slot ' .. slot .. ' did not load (no plot)')
+
+                local effects = game.Workspace:FindFirstChild('Effects')
+                local answered = {}
+                local blindClaim = false
+                local function claim()
+                    local land = _G['获得土地'] and _G['获得土地']()
+                    if not land then return false end
+                    pcall(function()
+                        rs.PropertyPurchasing.ClientPurchasedProperty:FireServer(land, land.OriginSquare.Position)
+                    end)
+                    return true
                 end
+
+                local tl = tick()
+                while tick() - tl < 120 and not loadErr do
+                    if loaded and ownedPlot() then break end
+                    local preview = effects and effects:FindFirstChild('StructureModel')
+                    if preview and not answered[preview] and not ownedPlot() then
+                        answered[preview] = true
+                        step('Picking a free plot...')
+                        claim()
+                    elseif not preview and not blindClaim and not ownedPlot() and tick() - tl > 12 then
+                        -- the picker never showed: claim a plot directly, like Auto Sold Sign does
+                        blindClaim = true
+                        claim()
+                    end
+                    task.wait(0.25)
+                end
+                _G['菜单']['快速加载'] = prevFast
+
+                if loadErr then
+                    return fail('load error: ' .. tostring(loadErr))
+                end
+                if not ownedPlot() then
+                    return fail('slot ' .. slot .. ' did not load (no plot claimed)')
+                end
+                local tw2 = tick()
+                repeat task.wait(0.5) until loaded or tick() - tw2 > 60
                 step('Slot ' .. slot .. ' loaded')
             end
 
@@ -2959,6 +3038,10 @@ do
                 LP.Character:FindFirstChildOfClass('Humanoid'):EquipTool(axe)
             end)
             step('End Times Axe in hand')
+            if testOnly then
+                step('Test OK: slot loaded and axe in hand', 5763719)
+                return true
+            end
 
             -- 3. cut the tree and bring the log to the base
             local plot = ownedPlot()
@@ -3014,6 +3097,21 @@ do
             step(t.class .. ' cut and brought to base (slot ' .. slot .. ')', 5763719)
             return true
         end
+
+        local testingCollect = false
+        Set:Button('Test now: load slot + take End Times Axe', function()
+            if cfg.active or cfg.autoHop then
+                return _G['提醒']('Stop the hop first')
+            end
+            if testingCollect then
+                return _G['提醒']('Test already running')
+            end
+            testingCollect = true
+            task.spawn(function()
+                pcall(autoCollect, { class = 'Test' }, setStatus, true)
+                testingCollect = false
+            end)
+        end)
 
         local function queueReload()
             local q = (syn and syn.queue_on_teleport) or queue_on_teleport or (fluxus and fluxus.queue_on_teleport)
@@ -3146,7 +3244,17 @@ do
                     setStatus('checking server for ' .. table.concat(targetList(), ', ') .. '...')
                     waitForTrees()
                     if not running() then break end
-                    local list = findTrees()
+                    local list, skipped = findTrees()
+                    if #list == 0 and #skipped > 0 then
+                        local parts = {}
+                        for i, sk in ipairs(skipped) do
+                            if i > 5 then break end
+                            parts[#parts + 1] = string.format('%s (%d sections)', sk.class, sk.sections)
+                        end
+                        local msg = string.format('Size filter (%s, limit %d) skipped: %s', tostring(cfg.size), tonumber(cfg.limit) or 0, table.concat(parts, ', '))
+                        _G['提醒'](msg)
+                        print('[Rndm] ' .. msg)
+                    end
                     if #list > 0 then
                         local t = list[1]
                         -- stop and save first, so nothing (reload, queued teleport) can resume the hunt
