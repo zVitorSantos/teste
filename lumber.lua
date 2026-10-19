@@ -2415,10 +2415,13 @@ do
                             ensureEsp(m, t)
                             keep[m] = true
                             local e = esp[m]
-                            if e and hrp and e.part then
-                                local d = math.floor((e.part.Position - hrp.Position).Magnitude)
+                            if e then
+                                local sections = 0
+                                for _, c in ipairs(m:GetChildren()) do
+                                    if c.Name == 'WoodSection' then sections = sections + 1 end
+                                end
                                 local nm = entry[2] and (t.name .. ' (chopped)') or t.name
-                                e.lbl.Text = string.format('%s [%d studs]', nm, d)
+                                e.lbl.Text = string.format('%s [%d sections]', nm, sections)
                             end
                         end
                     end
@@ -2494,8 +2497,11 @@ do
         local FILE = 'DarkX_treefinder.json'
         local cfg = {
             targets = { 'Spooky', 'SpookyNeon' },
-            size = 'Any',
-            limit = 10,
+            size = 'Skip small',
+            smallPct = 35,
+            bigPct = 70,
+            seenMax = {},
+            minSec = '',
             tpFound = true,
             autoCollect = false,
             baseSlot = 1,
@@ -2526,6 +2532,12 @@ do
                 end
             end
         end)
+
+        -- older configs used Small/Big with one fixed section limit for every tree
+        if cfg.size ~= 'Any' and cfg.size ~= 'Skip small' and cfg.size ~= 'Only big' then
+            cfg.size = 'Skip small'
+        end
+        if type(cfg.seenMax) ~= 'table' then cfg.seenMax = {} end
 
         if cfg.source == 'DarkX.lua' and not (isfile and isfile('DarkX.lua')) then
             cfg.source = SCRIPT_URL
@@ -2710,16 +2722,32 @@ do
             cfg.targets = sel
             save()
         end, cfg.targets)
-        Opt:DropDown('Tree Size', { 'Any', 'Small', 'Big' }, false, false, function(v)
+        Opt:DropDown('Tree Size', { 'Any', 'Skip small', 'Only big' }, false, false, function(v)
             cfg.size = v
             save()
         end, cfg.size)
-        Opt:Label('Tree Size counts WoodSections (trunk + branch pieces), not thickness.')
-        Opt:Label('Small = sections <= limit, Big = sections > limit. Any ignores the limit.')
-        Opt:NumberInput('Size limit (sections)', tonumber(cfg.limit) or 1, 1, 1000, function(n)
-            cfg.limit = math.floor(n)
+        Opt:Label('Size = number of WoodSections (trunk + branch pieces), judged per tree type.')
+        Opt:Label('The script learns the biggest tree of each type it sees (kept across hops).')
+        Opt:NumberInput('Small = under % of biggest seen', tonumber(cfg.smallPct) or 35, 5, 95, function(n)
+            cfg.smallPct = math.floor(n)
             save()
-        end, 1)
+        end, 5)
+        Opt:NumberInput('Big = at least % of biggest seen', tonumber(cfg.bigPct) or 70, 10, 100, function(n)
+            cfg.bigPct = math.floor(n)
+            save()
+        end, 5)
+        local MINSEC_HINT = 'optional, e.g. Spooky=8, SpookyNeon=8'
+        Opt:TextBox('Fixed min sections per type', cfg.minSec ~= '' and cfg.minSec or MINSEC_HINT, function(v)
+            cfg.minSec = (v == MINSEC_HINT) and '' or v
+            save()
+        end)
+        local sizeLabel = Opt:Label('Learned: nothing yet')
+        Opt:Button('Reset learned sizes', function()
+            cfg.seenMax = {}
+            save()
+            sizeLabel.Text = 'Learned: nothing yet'
+            _G['提醒']('Learned tree sizes cleared')
+        end)
 
         local Web = Finder:Section('Webhook', true, true):SetOrder(5)
         Web:Toggle('Send webhook when found', cfg.webhookOn, function(v)
@@ -2781,10 +2809,30 @@ do
             return table.find(targetList(), class) ~= nil
         end
 
+        -- Fixed per-type minimums typed by the user, e.g. "Spooky=8, SpookyNeon=8".
+        local function minSecOverrides()
+            local out = {}
+            for name, num in tostring(cfg.minSec or ''):gmatch('([%w_]+)%s*=%s*(%d+)') do
+                out[name] = tonumber(num)
+            end
+            return out
+        end
+
+        -- Small/big cut for one tree type: a fixed minimum if the user set one, otherwise a
+        -- percentage of the biggest tree of that type seen so far (this server included).
+        local function sizeCuts(class, serverMax)
+            local biggest = math.max(tonumber(cfg.seenMax[class]) or 0, serverMax or 0)
+            local fixed = minSecOverrides()[class]
+            local small = fixed or math.max(2, math.floor(biggest * (tonumber(cfg.smallPct) or 35) / 100 + 0.5))
+            local big = math.max(small, math.floor(biggest * (tonumber(cfg.bigPct) or 70) / 100 + 0.5))
+            return small, big, biggest
+        end
+
         -- returns matching trees (biggest first) and the target trees the size filter rejected
         local function findTrees(matcher, ignoreSize)
             matcher = matcher or matchesType
-            local list, skipped = {}, {}
+            local found = {}
+            local serverMax = {}
             local seen = 0
             for _, region in ipairs(game:GetService('Workspace'):GetChildren()) do
                 if region.Name == 'TreeRegion' then
@@ -2805,20 +2853,53 @@ do
                                         intact = true
                                     end
                                 end
-                                local sizeOk = ignoreSize or (cfg.size == 'Any')
-                                    or (cfg.size == 'Small' and n <= cfg.limit)
-                                    or (cfg.size == 'Big' and n > cfg.limit)
-                                if intact and sizeOk then
-                                    table.insert(list, { model = m, class = tostring(tc.Value), sections = n, part = ws })
-                                elseif intact then
-                                    table.insert(skipped, { class = tostring(tc.Value), sections = n })
+                                if intact then
+                                    local class = tostring(tc.Value)
+                                    found[#found + 1] = { model = m, class = class, sections = n, part = ws }
+                                    serverMax[class] = math.max(serverMax[class] or 0, n)
                                 end
                             end
                         end
                     end
                 end
             end
+
+            -- learn the biggest of each type, so "small" means small for that type
+            local learned = false
+            for class, n in pairs(serverMax) do
+                if n > (tonumber(cfg.seenMax[class]) or 0) then
+                    cfg.seenMax[class] = n
+                    learned = true
+                end
+            end
+            if learned then save() end
+
+            local list, skipped = {}, {}
+            for _, t in ipairs(found) do
+                local small, big = sizeCuts(t.class, serverMax[t.class])
+                t.smallCut, t.bigCut = small, big
+                local ok = ignoreSize or cfg.size == 'Any'
+                    or (cfg.size == 'Skip small' and t.sections >= small)
+                    or (cfg.size == 'Only big' and t.sections >= big)
+                if ok then
+                    list[#list + 1] = t
+                else
+                    skipped[#skipped + 1] = t
+                end
+            end
             table.sort(list, function(a, b) return a.sections > b.sections end)
+
+            local parts = {}
+            for _, class in ipairs(targetList()) do
+                local small, big, biggest = sizeCuts(class, serverMax[class])
+                if biggest > 0 then
+                    parts[#parts + 1] = string.format('%s biggest %d (small <%d, big %d+)', class, biggest, small, big)
+                end
+            end
+            pcall(function()
+                sizeLabel.Text = #parts > 0 and ('Learned: ' .. table.concat(parts, ' | ')) or 'Learned: nothing yet'
+            end)
+
             return list, skipped
         end
 
@@ -2844,7 +2925,7 @@ do
                     title = 'Tree found: ' .. t.class,
                     color = 5763719,
                     fields = {
-                        { name = 'Sections', value = tostring(t.sections), inline = true },
+                        { name = 'Sections', value = string.format('%d (biggest %s seen: %d)', t.sections, t.class, tonumber(cfg.seenMax[t.class]) or t.sections), inline = true },
                         { name = 'Players', value = string.format('%d/%d', #Players:GetPlayers(), Players.MaxPlayers), inline = true },
                         { name = 'Hops', value = tostring(cfg.hops), inline = true },
                         { name = 'Auto collect', value = cfg.autoCollect and ('on, slot ' .. tostring(cfg.baseSlot)) or 'off', inline = true },
@@ -2871,7 +2952,8 @@ do
         end
 
         local function onFound(t)
-            _G['提醒'](string.format('%s tree found! (%d sections)', t.class, t.sections))
+            local biggest = tonumber(cfg.seenMax[t.class]) or t.sections
+            _G['提醒'](string.format('%s tree found! %d sections (biggest seen %d)', t.class, t.sections, biggest))
             if cfg.soundOn then playAlert() end
             sendWebhook(t)
             if cfg.tpFound and not cfg.autoCollect then
@@ -3249,9 +3331,10 @@ do
                         local parts = {}
                         for i, sk in ipairs(skipped) do
                             if i > 5 then break end
-                            parts[#parts + 1] = string.format('%s (%d sections)', sk.class, sk.sections)
+                            local need = cfg.size == 'Only big' and sk.bigCut or sk.smallCut
+                            parts[#parts + 1] = string.format('%s %d sections (needs %d+)', sk.class, sk.sections, need or 0)
                         end
-                        local msg = string.format('Size filter (%s, limit %d) skipped: %s', tostring(cfg.size), tonumber(cfg.limit) or 0, table.concat(parts, ', '))
+                        local msg = string.format('%s skipped: %s', tostring(cfg.size), table.concat(parts, ', '))
                         _G['提醒'](msg)
                         print('[Rndm] ' .. msg)
                     end
@@ -4358,213 +4441,243 @@ do
         end
     end)]]
 
-    _G['处理树'] = function(tree)
-        local globals = _G
-        local globals2 = _G
-        local axe, axe2 = _G['检查斧头'](tree.TreeClass.Value)
+    -- Mod Wood: turns a whole log into planks through a small branch piece.
+    --   1. pick a branch tip ("keep") and the section it grows from ("burn")
+    --   2. set the burn section on fire with lava, then sell it, which frees the tip
+    --   3. hold the tip in the sawmill while chopping the log at its base
+    -- Every wait has a timeout and fly/lava are always restored, even on failure.
+    _G['模木中止'] = false
+    _G['模木进行中'] = false
 
-        globals2['伤害'] = axe2
-        globals['斧头'] = axe
+    local function modWood(tree, report)
+        local me = _G['自己']
+        local function aborted()
+            return _G['模木中止'] == true
+        end
 
-        if _G['伤害'] then
-            _G['锯木机'] = _G['菜单']['选择的锯木机'].Particles.CFrame + Vector3.new(0.7, 0, 0)
-            _G['保留'] = nil
+        if not (tree and tree.Parent and tree:FindFirstChild('TreeClass')) then
+            return false, 'that is not a log'
+        end
+        local owner = tree:FindFirstChild('Owner')
+        if not owner or owner.Value ~= me then
+            return false, 'the log is not yours'
+        end
+        if tree:FindFirstAncestor('TreeRegion') then
+            return false, 'cut the tree first, this is still standing'
+        end
+        local saw = _G['菜单']['选择的锯木机']
+        if not (saw and saw.Parent and saw:FindFirstChild('Particles')) then
+            return false, 'select a sawmill first'
+        end
+        local class = tostring(tree.TreeClass.Value)
+        local axe, damage = _G['检查斧头'](class)
+        if not (axe and damage) then
+            return false, 'you need an axe that can cut ' .. class
+        end
+        _G['斧头'], _G['伤害'] = axe, damage
 
-            local _CFrame4 = _G['自己'].Character.HumanoidRootPart.CFrame
-            local nextFn3 = next
-            local children2, startKey3 = tree:GetChildren()
-
-            for _, child in nextFn3, children2, startKey3 do
-                if tostring(tree.TreeClass.Value) == 'Pine' or tostring(tree.TreeClass.Value) == 'Fir' then
-                    local children3 = child:GetChildren()
-                    local count = 0
-
-                    for _, child2 in next, children3 do
-                        if child2.Name == 'WoodSection' then
-                            count = count + 1
-                        end
-                    end
-
-                    if count >= 2 then
-                        for _, child2 in next, children3 do
-                            if child2.Name == 'WoodSection' then
-                                if child2:WaitForChild('ID').Value ~= 1 then
-                                    if #child2:FindFirstChild('ChildIDs'):GetChildren() == 0 then
-                                        if child2:FindFirstChild('ParentID') then
-                                            if child2.ParentID.Value == 1 then
-                                                local globals3 = _G
-
-                                                if _G['保留'] or not child2 then
-                                                    child2 = _G['保留']
-                                                end
-
-                                                globals3['保留'] = child2
-                                            end
-                                        end
-                                    end
-                                end
-                            end
-                        end
-                    end
-                elseif child.Name == 'WoodSection' then
-                    if child:WaitForChild('ID').Value ~= 1 then
-                        if #child:FindFirstChild('ChildIDs'):GetChildren() == 0 then
-                            if child:FindFirstChild('ParentID') then
-                                if child.ParentID.Value ~= 1 then
-                                    local globals3 = _G
-                                    local keepPart
-
-                                    if _G['保留'] or not child then
-                                        keepPart = _G['保留']
-                                    else
-                                        keepPart = child
-                                    end
-
-                                    globals3['保留'] = keepPart
-
-                                    if child.Size.Z < _G['保留'].Size.Z then
-                                        wait()
-
-                                        _G['保留'] = child
-                                    end
-                                end
-                            end
-                        end
-                    end
+        -- 1. sections by ID; a tip has no ChildIDs and its parent is not the trunk base
+        local byId, tips, trunkTips = {}, {}, {}
+        for _, c in ipairs(tree:GetChildren()) do
+            local id = c.Name == 'WoodSection' and c:FindFirstChild('ID')
+            if id then
+                byId[id.Value] = c
+            end
+        end
+        for id, c in pairs(byId) do
+            local kids = c:FindFirstChild('ChildIDs')
+            local parentId = c:FindFirstChild('ParentID')
+            if id ~= 1 and kids and #kids:GetChildren() == 0 and parentId and byId[parentId.Value] then
+                if parentId.Value ~= 1 then
+                    tips[#tips + 1] = c
+                else
+                    trunkTips[#trunkTips + 1] = c
                 end
             end
+        end
+        if #tips == 0 then
+            if #trunkTips > 0 then
+                return false, 'its branches grow straight from the base (pine-like). Use a branchier log'
+            end
+            return false, 'the log has no branches to mod'
+        end
+        table.sort(tips, function(a, b) return a.Size.Z < b.Size.Z end)
+        local keep = tips[1]
+        local burn = byId[keep.ParentID.Value]
+        _G['保留'], _G['烧毁'] = keep, burn
 
-            _G['烧毁'] = nil
-
-            local nextFn4 = next
-            local children3, startKey4 = _G['保留'].Parent:GetChildren()
-
-            for _, child in nextFn4, children3, startKey4 do
-                if child.Name == 'WoodSection' then
-                    if child:WaitForChild('ID').Value == _G['保留'].ParentID.Value then
-                        wait()
-
-                        _G['烧毁'] = child
-                    end
+        local lava = _G['岩浆']
+        if not (lava and lava.Parent) then
+            local vol = game.Workspace:FindFirstChild('Region_Volcano')
+            for _, r in ipairs(vol and vol:GetChildren() or {}) do
+                local l = r:FindFirstChild('Lava')
+                if l and l:IsA('BasePart') then
+                    lava = l
+                    _G['岩浆'] = l
+                    break
                 end
             end
+        end
+        if not lava then
+            return false, 'volcano lava not found'
+        end
 
-            if _G['烧毁'] and _G['保留'] then
-                local _BoxHandleAdornment = Instance.new('BoxHandleAdornment', _G['保留'])
+        local mark = Instance.new('BoxHandleAdornment')
+        mark.Name = 'Selection'
+        mark.Adornee = keep
+        mark.AlwaysOnTop = true
+        mark.ZIndex = 0
+        mark.Size = keep.Size
+        mark.Color = BrickColor.new('Lime green')
+        mark.Parent = keep
 
-                _BoxHandleAdornment.Name = 'Selection'
-                _BoxHandleAdornment.Adornee = _BoxHandleAdornment.Parent
-                _BoxHandleAdornment.AlwaysOnTop = true
-                _BoxHandleAdornment.ZIndex = 0
-                _BoxHandleAdornment.Size = _BoxHandleAdornment.Parent.Size
-                _BoxHandleAdornment.Transparency = 0
-                _BoxHandleAdornment.Color = BrickColor.new('Lime green')
-                _G['菜单']['飞行'] = true
+        local origin = me.Character.HumanoidRootPart.CFrame
+        local lavaCF = lava.CFrame
+        local oldSpeed = _G['菜单']['飞行速度']
+        local logParts = {}
+        local cleaned = false
+        local function cleanup()
+            if cleaned then return end
+            cleaned = true
+            pcall(function() lava.CFrame = lavaCF end)
+            _G['菜单']['飞行'] = false
+            task.spawn(function() pcall(_G['飞行'], false) end)
+            _G['菜单']['飞行速度'] = oldSpeed
+            pcall(function() mark:Destroy() end)
+        end
 
-                spawn(function()
-                    _G['飞行'](true)
-                end)
+        local ok, err = pcall(function()
+            -- 2a. ignite the burn section
+            report('Burning the branch base...')
+            _G['菜单']['飞行'] = true
+            task.spawn(function() pcall(_G['飞行'], true) end)
+            _G['菜单']['飞行速度'] = 0
+            _G['传送'](tree.WoodSection.CFrame)
 
-                _G['旧的飞行速度'] = _G['菜单']['飞行速度']
-                _G['菜单']['飞行速度'] = 0
-
-                _G['传送'](tree.WoodSection.CFrame)
-
-                repeat
-                    spawn(function()
-                        _G['拉东西']:FireServer(tree)
-                        tree:PivotTo(CFrame.new(-1665.86548, 355.800415, 1478.47742))
-                        pcall(function()
-                            spawn(function()
-                                _G['岩浆'].Size = Vector3.new(0, 0, 0)
-                                _G['岩浆'].Size = Vector3.new(0, 0, 0)
-                            end)
-
-                            _G['岩浆'].CFrame = _G['烧毁'].CFrame
-                            _G['岩浆'].Size = Vector3.new(0, 0, 0)
-                            _G['岩浆'].Size = Vector3.new(0, 0, 0)
-                            _G['岩浆'].Size = Vector3.new(0, 0, 0)
-                        end)
-                    end)
-                    game['Run Service'].Heartbeat:wait()
-                until _G['烧毁']:FindFirstChild('LavaFire')
-
-                _G['岩浆'].CFrame = CFrame.new(-1675.2002, 255.002533, 1284.19983, 0.866007268, 0, 0.500031412, 0, 1, 0, -0.500031412, 0, 0.866007268)
-
-                _G['烧毁']:FindFirstChild('LavaFire'):Destroy()
-
-                local flag = false
-
-                _G['烧毁'].AncestryChanged:Connect(function()
-                    flag = true
-                end)
-                _G['拉东西']:FireServer(tree)
-
-                for _ = 1, 30 do
+            local t0 = tick()
+            repeat
+                if aborted() then error('aborted', 0) end
+                pcall(function()
                     _G['拉东西']:FireServer(tree)
+                    tree:PivotTo(CFrame.new(-1665.86548, 355.800415, 1478.47742))
+                    lava.CFrame = burn.CFrame
+                    if firetouchinterest then
+                        firetouchinterest(burn, lava, 0)
+                        firetouchinterest(burn, lava, 1)
+                    end
+                end)
+                game['Run Service'].Heartbeat:Wait()
+            until burn:FindFirstChild('LavaFire') or tick() - t0 > 15
+            pcall(function() lava.CFrame = lavaCF end)
+            if not burn:FindFirstChild('LavaFire') then
+                error('the lava did not set the branch on fire', 0)
+            end
+            pcall(function() burn.LavaFire:Destroy() end)
 
+            -- 2b. cool it down away from the volcano, then sell the burnt section
+            for _ = 1, 30 do
+                pcall(function()
+                    _G['拉东西']:FireServer(tree)
                     tree.WoodSection.Velocity = Vector3.new(0, 0, 0)
                     tree.WoodSection.RotVelocity = Vector3.new(0, 0, 0)
-
                     tree:PivotTo(CFrame.new(-904, 150, -3396))
-                    _G['拉东西']:FireServer(tree)
-                    task.wait()
-                end
-
-                _G['传送'](_G['烧毁'].CFrame)
-
-                repeat
-                    _G['拉东西']:FireServer(tree)
-                    _G['烧毁']:PivotTo(CFrame.new(315, 5, 85.4999924))
-                    _G['拉东西']:FireServer(tree)
-                    game['Run Service'].Heartbeat:wait()
-                until flag
-
-                _G['完成'] = false
-
-                local conn = game:GetService('Workspace').LogModels.ChildAdded:Connect(function(child)
-                    if child:WaitForChild('Owner', 1).Value == _G['自己'] then
-                        _G['完成'] = true
-                    end
                 end)
-
-                _G['菜单']['飞行'] = false
-
-                spawn(function()
-                    _G['飞行'](false)
-                end)
-
-                _G['菜单']['飞行速度'] = _G['旧的飞行速度']
-
-                _G['传送'](CFrame.new(tree.WoodSection.CFrame.p) + Vector3.new(3, 0, 0))
-                spawn(function()
-                    repeat
-                        _G['拉东西']:FireServer(tree)
-
-                        _G['保留'].Velocity = Vector3.new()
-                        _G['保留'].RotVelocity = Vector3.new()
-
-                        _G['保留']:PivotTo(_G['锯木机'])
-                        game['Run Service'].Heartbeat:wait()
-                    until _G['完成'] == true
-                end)
-
-                repeat
-                    _G['传送'](CFrame.new(tree.WoodSection.CFrame.p) + Vector3.new(5, 0, 0))
-                    _G['砍'](tree.CutEvent, _G['斧头'], 1, 0.3, _G['伤害'])
-                    game['Run Service'].Heartbeat:wait()
-                until _G['完成'] == true or tree.Parent == nil
-
-                conn:Disconnect()
-                _G['传送'](_CFrame4)
-
-                return
-            else
-                return _G['提醒']('cant mod this wood')
+                task.wait()
             end
-        else
-            return _G['提醒']('you need one axe')
+
+            report('Selling the burnt section...')
+            local sold = false
+            local soldConn = burn.AncestryChanged:Connect(function() sold = true end)
+            _G['传送'](burn.CFrame)
+            local t1 = tick()
+            repeat
+                if aborted() then soldConn:Disconnect() error('aborted', 0) end
+                pcall(function()
+                    _G['拉东西']:FireServer(tree)
+                    burn:PivotTo(CFrame.new(315, 5, 85.4999924))
+                end)
+                game['Run Service'].Heartbeat:Wait()
+            until sold or not burn.Parent or tick() - t1 > 15
+            soldConn:Disconnect()
+            if not (sold or not burn.Parent) then
+                error('the burnt section did not sell', 0)
+            end
+
+            -- 3. hold the tip in the sawmill and chop the base
+            report('Milling: holding the branch in the sawmill and chopping...')
+            _G['菜单']['飞行'] = false
+            task.spawn(function() pcall(_G['飞行'], false) end)
+            _G['菜单']['飞行速度'] = oldSpeed
+
+            local sawCF = saw.Particles.CFrame + Vector3.new(0.7, 0, 0)
+            _G['锯木机'] = sawCF
+            local done = false
+            local logConn = game.Workspace.LogModels.ChildAdded:Connect(function(child)
+                local o = child:WaitForChild('Owner', 2)
+                if o and o.Value == me then
+                    done = true
+                end
+            end)
+
+            task.spawn(function()
+                while not done and not aborted() and keep.Parent do
+                    pcall(function()
+                        _G['拉东西']:FireServer(tree)
+                        keep.Velocity = Vector3.new()
+                        keep.RotVelocity = Vector3.new()
+                        keep:PivotTo(sawCF)
+                    end)
+                    game['Run Service'].Heartbeat:Wait()
+                end
+            end)
+
+            local t2 = tick()
+            repeat
+                local base = byId[1]
+                if not (base and base.Parent) then break end
+                pcall(function()
+                    _G['传送'](CFrame.new(base.Position) + Vector3.new(5, 0, 0))
+                    _G['砍'](tree.CutEvent, _G['斧头'], 1, 0.3, _G['伤害'])
+                end)
+                game['Run Service'].Heartbeat:Wait()
+            until done or not tree.Parent or aborted() or tick() - t2 > 60
+            done = true
+            logConn:Disconnect()
+            if aborted() then error('aborted', 0) end
+            if tick() - t2 > 60 then
+                error('chopping the base timed out', 0)
+            end
+        end)
+
+        cleanup()
+        pcall(function() _G['传送'](origin) end)
+        if not ok then
+            return false, tostring(err)
         end
+        return true
+    end
+
+    -- report(msg) is optional; returns true or false, reason
+    _G['处理树'] = function(tree, report)
+        report = report or function(msg) _G['提醒'](msg) end
+        if _G['模木进行中'] then
+            report('Mod Wood is already running')
+            return false, 'busy'
+        end
+        _G['模木进行中'] = true
+        _G['模木中止'] = false
+        local okCall, ok, why = pcall(modWood, tree, report)
+        _G['模木进行中'] = false
+        if not okCall then
+            why = tostring(ok)
+            ok = false
+        end
+        if ok then
+            report('Mod Wood done')
+        else
+            report('Mod Wood failed: ' .. tostring(why))
+        end
+        return ok, why
     end
 
     local _Wood = window:CreateTab('Wood', '6034503369')
@@ -4809,24 +4922,24 @@ do
             end
 
             setStatus('mod wood...')
-            local done = false
-            local th = task.spawn(function()
-                pcall(_G['处理树'], myLog)
+            local done, modOk, modWhy = false, false, nil
+            task.spawn(function()
+                local okc, a, b = pcall(_G['处理树'], myLog, function(msg) setStatus('mod wood: ' .. msg) end)
+                modOk = okc and a == true
+                modWhy = okc and b or a
                 done = true
             end)
             local t1 = tick()
             while alive(my) and not done and tick() - t1 < (farmSize == 'big' and 300 or 150) do
                 task.wait(0.3)
             end
-            if not done then
-                pcall(function() task.cancel(th) end)
-                _G['菜单']['飞行'] = false
-                pcall(function() _G['飞行'](false) end)
-                setStatus('mod wood stuck, selling logs...')
+            if not done or not modOk then
+                _G['模木中止'] = true -- the mod wood loop restores fly/lava itself when it stops
+                setStatus('mod wood failed, selling logs...')
                 pcall(_G['卖木头'])
                 pcall(function() _G['传送'](SELL_CF) end)
                 if not alive(my) then return false, 'stopped' end
-                return false, 'mod wood timed out'
+                return false, done and ('mod wood: ' .. tostring(modWhy)) or 'mod wood timed out'
             end
             if not alive(my) then return false, 'stopped' end
 
@@ -4947,80 +5060,121 @@ do
 
     local _Mod = _Wood:Section('Sawmill Mod', true, true)
 
-    _G['处理树锯木机'] = _Mod:Label('Please Selecet one Sawmill')
+    _Mod:Label('Mod Wood mills a whole log through one small branch piece.')
+    _Mod:Label('Needs: a sawmill, your own cut log with branches, an axe for that wood.')
+    _G['处理树锯木机'] = _Mod:Label('Sawmill : not selected')
+    local modStatus = _Mod:Label('Status : idle')
+    local function modReport(msg)
+        modStatus.Text = 'Status : ' .. msg
+        _G['提醒'](msg)
+    end
 
-    _Mod:Button('select Sawmill', function()
+    local function sawmillOk()
+        local s = _G['菜单']['选择的锯木机']
+        return s and s.Parent and s:FindFirstChild('Particles') and s or nil
+    end
+
+    _Mod:Button('Select Sawmill (click one)', function()
         _G['菜单']['选择的锯木机'] = _G['选择锯木机']()
-        _G['处理树锯木机'].Text = 'Selected'
+        _G['处理树锯木机'].Text = sawmillOk() and 'Sawmill : selected' or 'Sawmill : not selected'
     end)
-    _Mod:Button('Mod Wood', function()
-        if _G['菜单']['选择的锯木机'] ~= nil then
-            local value = nil
 
-            if _G['菜单']['正在处理树'] ~= true then
-                _G['菜单']['正在处理树'] = true
+    local function runMod(log)
+        task.spawn(function()
+            _G['处理树'](log, modReport)
+        end)
+    end
 
-                _G['提醒']('Click one Wood ')
-
-                local conn = _G['鼠标'].Button1Up:Connect(function()
-                    wait()
-
-                    local _Parent2 = _G['鼠标'].Target.Parent
-
-                    if _Parent2:FindFirstChild('Owner') and (_Parent2.Owner.Value == _G['自己'] and _Parent2:FindFirstChild('WoodSection')) and not (_Parent2:FindFirstAncestor('TreeRegion') or _Parent2:FindFirstChild('RootCut')) then
-                        wait()
-
-                        value = _Parent2
-
-                        _G['提醒']('Wood Selected')
-                    end
-                end)
-
-                repeat
-                    task.wait(0.1)
-                until value ~= nil
-
-                conn:Disconnect()
-                _G['处理树'](value)
-
-                _G['菜单']['正在处理树'] = false
-
-                return
-            else
-                return _G['提醒']('you are using this feature')
-            end
-        else
-            return _G['提醒']('select Sawmail At First')
+    _Mod:Button('Mod Wood (click a log)', function()
+        if not sawmillOk() then
+            return modReport('Select a sawmill first')
         end
+        if _G['模木进行中'] or _G['菜单']['正在处理树'] then
+            return modReport('Mod Wood is already running')
+        end
+        _G['菜单']['正在处理树'] = true
+        modReport('Click one of your logs (20s)')
+        local picked = nil
+        local conn = _G['鼠标'].Button1Up:Connect(function()
+            local target = _G['鼠标'].Target
+            local m = target and target.Parent
+            if m and m:FindFirstChild('Owner') and m.Owner.Value == _G['自己'] and m:FindFirstChild('WoodSection') and m:FindFirstChild('TreeClass') and not (m:FindFirstAncestor('TreeRegion') or m:FindFirstChild('RootCut')) then
+                picked = m
+            end
+        end)
+        task.spawn(function()
+            local t0 = tick()
+            repeat task.wait(0.1) until picked or tick() - t0 > 20
+            conn:Disconnect()
+            _G['菜单']['正在处理树'] = false
+            if not picked then
+                return modReport('No log clicked')
+            end
+            runMod(picked)
+        end)
     end)
+
+    _Mod:Button('Mod my newest log', function()
+        if not sawmillOk() then
+            return modReport('Select a sawmill first')
+        end
+        local newest = nil
+        for _, m in ipairs(game.Workspace.LogModels:GetChildren()) do
+            local o = m:FindFirstChild('Owner')
+            if o and o.Value == _G['自己'] and m:FindFirstChild('TreeClass') and m:FindFirstChild('WoodSection') then
+                newest = m
+            end
+        end
+        if not newest then
+            return modReport('You have no cut logs')
+        end
+        runMod(newest)
+    end)
+
+    _Mod:Button('Abort Mod Wood', function()
+        _G['模木中止'] = true
+        modReport('Aborting...')
+    end, { stopper = true })
+
+    -- Press a sawmill button until its size value stops changing (or 40 presses).
+    local function sawmillTo(up)
+        local saw = sawmillOk()
+        if not saw then
+            return modReport('Select a sawmill first')
+        end
+        task.spawn(function()
+            local settings = saw:FindFirstChild('Settings')
+            for _, axis in ipairs({ 'X', 'Y' }) do
+                local remote = saw:FindFirstChild('ButtonRemote_' .. axis .. (up and 'Up' or 'Down'))
+                local value = settings and settings:FindFirstChild('Dim' .. axis)
+                if remote then
+                    local last, same = nil, 0
+                    for _ = 1, 40 do
+                        pcall(function()
+                            game:GetService('ReplicatedStorage').Interaction.RemoteProxy:FireServer(remote)
+                        end)
+                        task.wait(0.3)
+                        if value then
+                            if value.Value == last then
+                                same = same + 1
+                                if same >= 2 then break end
+                            else
+                                same = 0
+                                last = value.Value
+                            end
+                        end
+                    end
+                end
+            end
+            modReport(up and 'Sawmill set to max' or 'Sawmill set to lowest')
+        end)
+    end
 
     _Mod:Button('Max Sawmill Settings', function()
-        if _G['菜单']['选择的锯木机'] ~= nil then
-            for _ = 1, 20 do
-                game:GetService('ReplicatedStorage').Interaction.RemoteProxy:FireServer(_G['菜单']['选择的锯木机'].ButtonRemote_XUp)
-                task.wait(1)
-                game:GetService('ReplicatedStorage').Interaction.RemoteProxy:FireServer(_G['菜单']['选择的锯木机'].ButtonRemote_YUp)
-                task.wait(1)
-            end
-
-            return
-        else
-            return _G['提醒']('select Sawmail At First')
-        end
+        sawmillTo(true)
     end)
     _Mod:Button('Lowest Sawmill Settings', function()
-        if _G['菜单']['选择的锯木机'] ~= nil then
-            for _ = 1, 20 do
-                game:GetService('ReplicatedStorage').Interaction.RemoteProxy:FireServer(_G['菜单']['选择的锯木机'].ButtonRemote_XDown)
-                task.wait(1)
-                game:GetService('ReplicatedStorage').Interaction.RemoteProxy:FireServer(_G['菜单']['选择的锯木机'].ButtonRemote_YDown)
-                task.wait(1)
-            end
-
-            return
-        else
-            return _G['提醒']('select Sawmail At First')
-        end
+        sawmillTo(false)
     end)
 
     _G['拿蛋'] = function()
